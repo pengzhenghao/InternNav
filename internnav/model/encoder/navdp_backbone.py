@@ -1,10 +1,13 @@
 import math
+import os
+import pathlib
 
 import torch
 import torch.nn as nn
 
 from internnav.model.encoder.depth_anything.depth_anything_v2.dpt import DepthAnythingV2
-
+ROOT_DIR = pathlib.Path(__file__).parent.parent.parent.parent.resolve()
+CHECKPOINT_DIR = ROOT_DIR / "checkpoints"
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
@@ -106,7 +109,7 @@ class DAT_RGBD_Patch_Backbone(nn.Module):
         embed_size=512,
         finetune=True,
         memory_size=8,
-        checkpoint="checkpoints/depth_anything_v2_vits.pth",
+        checkpoint="depth_anything_v2_vits.pth",
         input_dtype="bf16",
         version=0.0,
         device='cuda:0',
@@ -121,6 +124,10 @@ class DAT_RGBD_Patch_Backbone(nn.Module):
 
         model_configs = {'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]}}
         self.rgb_model = DepthAnythingV2(**model_configs['vits'])
+        
+        checkpoint = CHECKPOINT_DIR / checkpoint
+        print(f"Loading checkpoint from {checkpoint}, current working directory: {ROOT_DIR}")
+
         self.rgb_model.load_state_dict(torch.load(checkpoint), strict=False)
         self.rgb_model = self.rgb_model.pretrained
 
