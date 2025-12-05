@@ -7,3 +7,6 @@
 	url = https://github.com/beichenzbc/Long-CLIP
 	commit = 3966af9ae9331666309a22128468b734db4672a7
 	ignore = untracked
+[submodule "habitat-lab"]
+	path = habitat-lab
+	url = https://github.com/facebookresearch/habitat-lab.git
