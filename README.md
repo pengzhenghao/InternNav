@@ -1,10 +1,49 @@
 
 # PZH Note
 
+## Habitat Environment Installation
 
+For Habitat environment setup, follow these steps:
+
+### Prerequisites
+- Python 3.9
+- PyTorch 2.6.0
+- CUDA 12.4
+- GPU: NVIDIA A100 or higher (optional for VLA training)
+
+### Installation Steps
+
+1. **Create conda environment:**
 ```bash
-
+conda create -n <env> python=3.9
+conda activate <env>
 ```
+
+2. **Install habitat-sim:**
+```bash
+conda install habitat-sim==0.2.4 withbullet headless -c conda-forge -c aihabitat
+```
+
+3. **Initialize and install habitat-lab submodule:**
+```bash
+# Initialize the submodule (if not already done)
+git submodule update --init --recursive habitat-lab
+
+# Install habitat-lab
+cd habitat-lab
+pip install -e habitat-lab  # install habitat_lab
+pip install -e habitat-baselines  # install habitat_baselines
+cd ..
+```
+
+4. **Install PyTorch and other requirements:**
+```bash
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+cd Path/to/InternNav/
+pip install -e .[habitat,internvla_n1]
+```
+
+**Note:** The habitat-lab repository is included as a git submodule in this repository. Make sure to initialize it with `git submodule update --init --recursive habitat-lab` before installing.
 
 
 ---
