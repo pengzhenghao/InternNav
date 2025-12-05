@@ -4,7 +4,6 @@ import math
 import os
 import sys
 
-import casadi as ca
 import numpy as np
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +27,8 @@ class Mpc_controller:
         self.ref_traj_len = N // ref_gap + 1
 
         # setup mpc problem
+        import casadi as ca
+
         opti = ca.Opti()
         opt_controls = opti.variable(N, 2)
         v, w = opt_controls[:, 0], opt_controls[:, 1]

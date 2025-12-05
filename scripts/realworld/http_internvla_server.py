@@ -10,6 +10,17 @@ from PIL import Image
 
 from internnav.agent.internvla_n1_agent_realworld import InternVLAN1AsyncAgent
 
+import pathlib
+from pathlib import Path
+import sys
+
+project_root = Path('../../')
+sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / 'src/diffusion-policy'))
+
+ROOT_DIR = pathlib.Path(__file__).parent.parent.parent.resolve()
+CHECKPOINT_DIR = ROOT_DIR / "checkpoints"
+
 app = Flask(__name__)
 idx = 0
 start_time = time.time()
@@ -81,19 +92,35 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--model_path", type=str, default="checkpoints/InternVLA-N1")
+    parser.add_argument("--model_path", type=str, default=CHECKPOINT_DIR / "InternVLA-N1")
     parser.add_argument("--resize_w", type=int, default=384)
     parser.add_argument("--resize_h", type=int, default=384)
     parser.add_argument("--num_history", type=int, default=8)
+    parser.add_argument("--plan_step_gap", type=int, default=8)
     args = parser.parse_args()
+
+    # class Args:
+    # def __init__(self):
+    #     self.device = "cuda:0"
+    #     self.model_path = "../../checkpoints/InternVLA-N1"
+    #     self.resize_w = 384
+    #     self.resize_h = 384
+    #     self.num_history = 8
+    #     self.camera_intrinsic = np.array([
+    #         [386.5, 0.0, 328.9, 0.0],
+    #         [0.0, 386.5, 244.0, 0.0],
+    #         [0.0, 0.0, 1.0, 0.0],
+    #         [0.0, 0.0, 0.0, 1.0]
+    #     ])
+    #     self.plan_step_gap = 8
 
     args.camera_intrinsic = np.array(
         [[386.5, 0.0, 328.9, 0.0], [0.0, 386.5, 244, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
     )
     agent = InternVLAN1AsyncAgent(args)
     agent.step(
-        np.zeros((480, 640, 3)),
-        np.zeros((480, 640)),
+        np.zeros((480, 640, 3), dtype=np.uint8),
+        np.zeros((480, 640), dtype=np.uint8),
         np.eye(4),
         "hello",
     )

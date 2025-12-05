@@ -10,7 +10,6 @@ from transformers import (
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from .navdp import NavDP_Policy_DPT_CriticSum_DAT
 
 
 def build_navdp(navdp_cfg):
@@ -19,6 +18,8 @@ def build_navdp(navdp_cfg):
         memory_size = 2
     else:
         memory_size = 3
+    
+    from .navdp import NavDP_Policy_DPT_CriticSum_DAT
 
     navdp = NavDP_Policy_DPT_CriticSum_DAT(
         memory_size=memory_size, navdp_pretrained=navdp_cfg.navdp_pretrained, navdp_version=navdp_version
