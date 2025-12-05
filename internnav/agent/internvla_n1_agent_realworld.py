@@ -27,6 +27,8 @@ class InternVLAN1AsyncAgent:
     def __init__(self, args):
         self.device = torch.device(args.device)
         self.save_dir = "test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.makedirs(self.save_dir, exist_ok=True)
+        
         print(f"args.model_path{args.model_path}")
         self.model = InternVLAN1ForCausalLM.from_pretrained(
             args.model_path,
@@ -124,7 +126,7 @@ class InternVLAN1AsyncAgent:
         angular_vel = np.clip(angular_vel, -0.5, 0.5)
         return linear_vel, angular_vel
 
-    def step(self, rgb, depth, pose, instruction, intrinsic, look_down=False):
+    def step(self, rgb, depth, pose, instruction, intrinsic=None, look_down=False):
         dual_sys_output = S2Output()
         no_output_flag = self.output_action is None and self.output_latent is None
         if (self.episode_idx - self.last_s2_idx > self.PLAN_STEP_GAP) or look_down or no_output_flag:
@@ -163,7 +165,7 @@ class InternVLAN1AsyncAgent:
 
         return dual_sys_output
 
-    def step_s2(self, rgb, depth, pose, instruction, intrinsic, look_down=False):
+    def step_s2(self, rgb, depth, pose, instruction, intrinsic=None, look_down=False):
         image = Image.fromarray(rgb).convert('RGB')
         if not look_down:
             image = image.resize((self.resize_w, self.resize_h))
