@@ -41,10 +41,22 @@ cd ..
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 cd Path/to/InternNav/
 pip install -e .[habitat,internvla_n1]
+
+wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp39-cp39-linux_x86_64.whl
+pip install flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp39-cp39-linux_x86_64.whl
 ```
 
 **Note:** The habitat-lab repository is included as a git submodule in this repository. Make sure to initialize it with `git submodule update --init --recursive habitat-lab` before installing.
 
+
+### Evaluate
+
+```bash
+
+# softlink the data to /data
+
+python scripts/eval/eval_habitat.py --model_path checkpoints/InternVLA-N1 --continuous_traj --output_path results/InternVLA-N1/val_unseen_32traj_8steps
+ ```
 
 ---
 

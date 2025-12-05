@@ -71,23 +71,29 @@ echo "3. Generate an access token at: https://huggingface.co/settings/tokens"
 echo ""
 read -p "Press Enter to continue..."
 
-# Check for Hugging Face token
+# Check if user is authenticated (either via HF_TOKEN or huggingface-cli login)
 if [ -z "$HF_TOKEN" ]; then
     echo ""
-    echo "Hugging Face token not found in environment."
+    echo "HF_TOKEN environment variable not found."
     echo "You can either:"
     echo "  1. Set HF_TOKEN environment variable: export HF_TOKEN=your_token"
-    echo "  2. Or login using: huggingface-cli login"
+    echo "  2. Or login using: huggingface-cli login (recommended)"
     echo ""
-    read -p "Do you want to login now? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        huggingface-cli login
+    huggingface-cli whoami &> /dev/null
+    if [ $? -ne 0 ]; then
+        read -p "You are not logged in to Hugging Face CLI. Do you want to login now? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            huggingface-cli login
+        else
+            echo "Please set HF_TOKEN or login with huggingface-cli before continuing."
+            exit 1
+        fi
     else
-        echo "Please set HF_TOKEN or login before continuing."
-        exit 1
+        echo "huggingface-cli authentication found. Proceeding..."
     fi
 fi
+
 
 echo ""
 echo "Starting download..."
