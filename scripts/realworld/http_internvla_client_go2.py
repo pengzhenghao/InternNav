@@ -11,6 +11,7 @@ Key Features:
     - MPC (Model Predictive Control) and PID control modes
     - Dry run mode for safe testing without robot movement
     - Callback rate monitoring and logging
+    - Configurable server query (enable/disable)
 
 Dry Run Mode:
     Dry run mode allows all data processing and planning to continue normally, but prevents
@@ -38,6 +39,7 @@ ROS Topics:
 
 Configuration:
     - HTTP inference server URL (default: http://127.0.0.1:5801/eval_dual)
+    - Enable/Disable server query: ENABLE_SERVER=true/false (default: true)
     - Control mode: MPC_Mode (default) or PID_Mode
     - PID controller gains: Kp_trans=2.0, Kp_yaw=1.5, max_v=0.6, max_w=0.5
     - Planning thread desired time: 0.3s
@@ -69,7 +71,7 @@ from requests.exceptions import ConnectionError, Timeout, RequestException
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from PIL import Image as PIL_Image
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 
 # user-specific
 from controllers import Mpc_controller, PID_controller
@@ -381,6 +383,12 @@ def planning_thread():
             continue
         logger.debug("New image arrived, processing")
         manager.new_image_arrived = False
+
+        if not manager.enable_server:
+            # logger.debug("Server query disabled, skipping inference")
+            time.sleep(PLANNING_THREAD_IDLE_SLEEP)
+            continue
+
         rgb_depth_rw_lock.acquire_read()
         logger.debug("Acquired read lock for RGB/depth data")
         try:
@@ -542,7 +550,19 @@ class Go2Manager(Node):
         dry_run_env = os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
         self.declare_parameter('dry_run', dry_run_env)
         self.dry_run = self.get_parameter('dry_run').get_parameter_value().bool_value
-        
+
+        # Use compressed images: if True, subscribes to compressed image topics
+        # Can be set via ROS parameter 'use_compressed' or environment variable 'USE_COMPRESSED'
+        use_compressed_env = os.getenv('USE_COMPRESSED', 'true').lower() in ('true', '1', 'yes')
+        self.declare_parameter('use_compressed', use_compressed_env)
+        self.use_compressed = self.get_parameter('use_compressed').get_parameter_value().bool_value
+
+        # Enable server query: if False, skips the HTTP request to the inference server
+        # Can be set via ROS parameter 'enable_server' or environment variable 'ENABLE_SERVER'
+        enable_server_env = os.getenv('ENABLE_SERVER', 'true').lower() in ('true', '1', 'yes')
+        self.declare_parameter('enable_server', enable_server_env)
+        self.enable_server = self.get_parameter('enable_server').get_parameter_value().bool_value
+
         if self.dry_run:
             logger.warning("=" * 60)
             logger.warning("DRY RUN MODE ENABLED - No control signals will be sent to robot")
@@ -564,9 +584,20 @@ class Go2Manager(Node):
         # - They're related but not the same: depth=10 means buffer 10 messages, queue_size=1 means buffer 1 message
         # - For ApproximateTimeSynchronizer, we need message_filters.Subscriber, not regular subscriptions
         sub_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
-        rgb_down_sub = Subscriber(self, Image, TOPIC_RGB_IMAGE, qos_profile=sub_qos)
 
-        depth_down_sub = Subscriber(self, Image, TOPIC_DEPTH_IMAGE, qos_profile=sub_qos)
+        if self.use_compressed:
+            rgb_topic = TOPIC_RGB_IMAGE + "/compressed"
+            depth_topic = TOPIC_DEPTH_IMAGE + "/compressed"
+            msg_type = CompressedImage
+            logger.info(f"Using compressed image topics: {rgb_topic}, {depth_topic}")
+        else:
+            rgb_topic = TOPIC_RGB_IMAGE
+            depth_topic = TOPIC_DEPTH_IMAGE
+            msg_type = Image
+            logger.info(f"Using raw image topics: {rgb_topic}, {depth_topic}")
+
+        rgb_down_sub = Subscriber(self, msg_type, rgb_topic, qos_profile=sub_qos)
+        depth_down_sub = Subscriber(self, msg_type, depth_topic, qos_profile=sub_qos)
         
         self.syncronizer = ApproximateTimeSynchronizer([rgb_down_sub, depth_down_sub], 1, 0.1)
         self.syncronizer.registerCallback(self.rgb_depth_down_callback)
@@ -696,7 +727,14 @@ class Go2Manager(Node):
         report_callback_rate('rgb_depth')
         logger.debug(f"RGB/Depth callback received data at {time.time():.3f}")
         try:
-            raw_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')[:, :, :]
+            if self.use_compressed:
+                # For compressed images, we explicitly decode to the desired format
+                raw_image = self.cv_bridge.compressed_imgmsg_to_cv2(rgb_msg, 'rgb8')
+                raw_depth = self.cv_bridge.compressed_imgmsg_to_cv2(depth_msg, 'passthrough')
+            else:
+                raw_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')[:, :, :]
+                raw_depth = self.cv_bridge.imgmsg_to_cv2(depth_msg, '16UC1')
+
             logger.debug(f"RGB image shape: {raw_image.shape}")
             # Resize image to lower resolution to save memory
             # Assuming original is high res, let's downscale if needed (e.g. to 640x480 or 320x240)
@@ -717,7 +755,8 @@ class Go2Manager(Node):
             image_bytes.seek(0)
             logger.debug("RGB image processed")
 
-            raw_depth = self.cv_bridge.imgmsg_to_cv2(depth_msg, '16UC1')
+            # Check if depth needs to be processed from compressed format (might be different type)
+            # raw_depth is already obtained above
             logger.debug(f"Depth image shape: {raw_depth.shape}")
             raw_depth[np.isnan(raw_depth)] = 0
             raw_depth[np.isinf(raw_depth)] = 0
