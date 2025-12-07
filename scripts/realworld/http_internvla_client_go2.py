@@ -110,7 +110,10 @@ TOPIC_CONTROL_COMMAND = "/api/sport/request"
 SERVICE_DRY_RUN = "~/set_dry_run"
 
 # HTTP Inference Server
-HTTP_INFERENCE_URL = "http://127.0.0.1:5801/eval_dual"
+# HTTP_INFERENCE_URL = "http://127.0.0.1:5801/eval_dual"
+
+HTTP_INFERENCE_URL = "http://bolei-gpu05.cs.ucla.edu:5801/eval_dual"
+
 HTTP_TIMEOUT = 100  # seconds
 
 # Control Parameters
