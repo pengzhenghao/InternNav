@@ -49,6 +49,33 @@ pip install flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp39-cp39-linux_x86_64.wh
 **Note:** The habitat-lab repository is included as a git submodule in this repository. Make sure to initialize it with `git submodule update --init --recursive habitat-lab` before installing.
 
 
+### Real-World Deployment Setup
+
+For deployment on the Unitree Go2 robot and the remote inference server:
+
+1.  **Install Dependencies:**
+    Run this on both the robot (laptop) and the remote server.
+    ```bash
+    pip install -r requirements/realworld_requirements.txt
+    ```
+
+2.  **Generate gRPC Code:**
+    If you modified the proto files, regenerate the python code:
+    ```bash
+    # From project root
+    python -m grpc_tools.protoc -I scripts/realworld/protos --python_out=scripts/realworld/protos --grpc_python_out=scripts/realworld/protos scripts/realworld/protos/internvla_stream.proto
+    ```
+
+3.  **Run Server:**
+    ```bash
+    python scripts/realworld/grpc_internvla_server.py --port 5801
+    ```
+
+4.  **Run Client (Robot):**
+    ```bash
+    python scripts/realworld/grpc_internvla_client_go2.py
+    ```
+
 ### Evaluate
 
 ```bash
