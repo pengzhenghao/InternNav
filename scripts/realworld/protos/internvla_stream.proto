@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package internvla.stream;
+
+// Bidirectional streaming for InternVLA inference.
+service InternVLAStream {
+  // Client opens one stream and sends frames/instructions/heartbeats.
+  // Server responds with actions/heartbeats on the same stream.
+  rpc Stream(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// Instruction updates issued by the operator UI.
+message Instruction {
+  string text = 1;
+  uint64 id = 2; // monotonically increasing instruction id
+}
+
+// RGB + depth frame from the robot.
+message Frame {
+  bytes image_jpeg = 1;
+  bytes depth_png = 2;
+  bool reset = 3;          // resets model state
+  uint64 seq = 4;          // client sequence number for tracing
+  string client_id = 5;    // optional identifier for metrics
+}
+
+// Liveness probe.
+message Heartbeat {
+  uint64 seq = 1;
+  string client_id = 2;
+}
+
+// Messages originating from the client.
+message ClientMessage {
+  oneof payload {
+    Frame frame = 1;
+    Instruction instruction = 2;
+    Heartbeat heartbeat = 3;
+  }
+}
+
+// Inference output.
+message Action {
+  repeated int32 discrete_action = 1; // e.g., [0], [5]
+  repeated float trajectory = 2;      // flattened list of xyz entries
+  repeated float pixel_goal = 3;      // [x, y] if present
+  string log = 4;                     // human-readable summary
+  string overlay_png_b64 = 5;         // optional overlay visualization
+  uint64 seq = 6;                     // echoes request seq for matching
+}
+
+// Messages originating from the server.
+message ServerMessage {
+  oneof payload {
+    Action action = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
