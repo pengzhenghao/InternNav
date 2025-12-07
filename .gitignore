@@ -157,3 +157,5 @@ result/
 assets/realworld_sample_data*/
 scripts/notebooks/test_data/
 flash_attn-2.7.3*.whl
+scripts/realworld/test_data/
+test_data/
