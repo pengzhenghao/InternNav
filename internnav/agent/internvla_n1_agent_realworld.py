@@ -116,7 +116,7 @@ class InternVLAN1AsyncAgent:
         image = Image.fromarray(rgb).convert('RGB')
         image = image.resize((self.resize_w, self.resize_h))
         self.rgb_list.append(image)
-        image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}.jpg")
+        image.save(f"{self.save_dir}/debug_raw_{self.episode_idx:04d}.jpg")
         self.episode_idx += 1
 
     def trajectory_tovw(self, trajectory, kp=1.0):
@@ -139,6 +139,10 @@ class InternVLAN1AsyncAgent:
             self.pixel_goal_depth = copy.deepcopy(depth)
         else:
             self.step_no_infer(rgb, depth, pose)
+
+        dual_sys_output.reference_output_pixel = self.output_pixel
+        dual_sys_output.reference_output_action = self.output_action
+        dual_sys_output.reference_output_latent = self.output_latent
 
         if self.output_action is not None:
             dual_sys_output.output_action = copy.deepcopy(self.output_action)
@@ -170,9 +174,9 @@ class InternVLAN1AsyncAgent:
         if not look_down:
             image = image.resize((self.resize_w, self.resize_h))
             self.rgb_list.append(image)
-            image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}.jpg")
+            image.save(f"{self.save_dir}/debug_raw_{self.episode_idx:04d}.jpg")
         else:
-            image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}_look_down.jpg")
+            image.save(f"{self.save_dir}/debug_raw_{self.episode_idx:04d}_look_down.jpg")
         if not look_down:
             self.conversation_history = []
             self.past_key_values = None
@@ -235,7 +239,7 @@ class InternVLAN1AsyncAgent:
         self.llm_output = self.processor.tokenizer.decode(
             output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
         )
-        with open(f"{self.save_dir}/llm_output_{self.episode_idx: 04d}.txt", 'w') as f:
+        with open(f"{self.save_dir}/llm_output_{self.episode_idx:04d}.txt", 'w') as f:
             f.write(self.llm_output)
         self.last_output_ids = copy.deepcopy(output_ids[0])
         self.past_key_values = copy.deepcopy(outputs.past_key_values)

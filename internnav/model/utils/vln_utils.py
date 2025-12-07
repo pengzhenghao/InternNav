@@ -158,6 +158,11 @@ class S2Output:
     rgb_memory: Optional[np.ndarray] = None  # 用于记录pixel goal那一帧的rgb
     depth_memory: Optional[np.ndarray] = None  # 用于记录pixel goal那一帧的depth
 
+    # These will only be used for visualization.
+    reference_output_pixel: Optional[np.ndarray] = None
+    reference_output_action: Optional[np.ndarray] = None
+    reference_output_latent: Optional[torch.Tensor] = None
+
     def validate(self):
         """确保output_action、output_pixel和output_latent中只有一个为非None"""
         outputs = [self.output_action, self.output_pixel, self.output_latent]
