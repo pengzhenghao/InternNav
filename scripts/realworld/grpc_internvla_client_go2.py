@@ -66,7 +66,9 @@ import internvla_stream_pb2_grpc
 # ============================================================================
 
 TOPIC_RGB_IMAGE = "/camera/camera/color/image_raw"
-TOPIC_DEPTH_IMAGE = "/camera/camera/depth/image_rect_raw"
+# TOPIC_DEPTH_IMAGE = "/camera/camera/depth/image_rect_raw"
+TOPIC_DEPTH_IMAGE = "/camera/camera/aligned_depth_to_color/image_raw"
+# PZH NOTE: Must turn on the aligned depth to color in the realsense node. via align_depth.enable:=true.
 TOPIC_ODOMETRY = "/sportmodestate"
 TOPIC_CONTROL_COMMAND = "/api/sport/request"
 SERVICE_DRY_RUN = "~/set_dry_run"
@@ -393,7 +395,9 @@ class Go2Manager(Node):
         self.declare_parameter('dry_run', default_dry_run)
         self.dry_run = self.get_parameter('dry_run').get_parameter_value().bool_value
         
-        self.declare_parameter('use_compressed', True)
+        # PZH: Default to False to match reference code behavior (Raw topics)
+        # Compressed depth often arrives as 8-bit which breaks logic
+        self.declare_parameter('use_compressed', False)
         self.use_compressed = self.get_parameter('use_compressed').get_parameter_value().bool_value
         
         self.declare_parameter('enable_server', True)
@@ -425,6 +429,8 @@ class Go2Manager(Node):
         self.cv_bridge = CvBridge()
         self.rgb_bytes = None
         self.depth_bytes = None
+        self.rgb_image = None
+        self.depth_image = None
         self.new_image_arrived = False
         
         self.odom = None
@@ -459,25 +465,56 @@ class Go2Manager(Node):
         report_callback_rate('rgb_depth')
         try:
             if self.use_compressed:
-                raw_image = self.cv_bridge.compressed_imgmsg_to_cv2(rgb_msg, 'rgb8')
+                raw_image = self.cv_bridge.compressed_imgmsg_to_cv2(rgb_msg, 'bgr8')
                 raw_depth = self.cv_bridge.compressed_imgmsg_to_cv2(depth_msg, 'passthrough')
             else:
-                raw_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')
+                raw_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
                 raw_depth = self.cv_bridge.imgmsg_to_cv2(depth_msg, '16UC1')
             
             # Compress RGB
-            img = PIL_Image.fromarray(raw_image)
+            # Convert BGR to RGB for PIL
+            rgb_for_pil = raw_image[:, :, ::-1]
+            img = PIL_Image.fromarray(rgb_for_pil)
             buf = io.BytesIO()
             img.save(buf, format='JPEG', quality=85)
             buf.seek(0)
             
-            # Process Depth
-            raw_depth[np.isnan(raw_depth)] = 0
-            raw_depth[np.isinf(raw_depth)] = 0
-            depth_m = raw_depth / 1000.0
-            depth_m[depth_m < 0] = 0
+            self.rgb_image = raw_image
             
-            depth_processed = (np.clip(depth_m * 10000.0, 0, 65535)).astype(np.uint16)
+            # Process Depth
+            # Reference code logic
+            # Safety check for nan/inf which only applies to floats
+            if raw_depth.dtype.kind == 'f':
+                raw_depth[np.isnan(raw_depth)] = 0
+                raw_depth[np.isinf(raw_depth)] = 0
+            
+            # Check for uint8 issue (often from compressed depth)
+            if raw_depth.dtype == np.uint8:
+                 # If we are here, we likely have 8-bit depth (0-255). 
+                 # This is insufficient for navigation but we process it anyway to avoid crash.
+                 # Warn once.
+                 if self.odom_cnt % 100 == 0:
+                     logger.warning("Depth image is uint8 (0-255 range). This implies lossy compression or wrong topic! Precision lost.")
+                 self.depth_image = raw_depth.astype(np.float32) / 1000.0 # Treat as mm? or arbitrary scale? 
+                 # If it was mm, 255mm = 0.25m. Too close.
+                 # If it was scaled, we don't know the scale.
+            else:
+                 # Check if we can get scale from ROS parameter? Or assume 1000.0 (1mm)
+                 # Reference code suggests scale might be dynamic, but standard Realsense ROS wrapper 
+                 # usually outputs 16UC1 in mm (scale=0.001) for aligned_depth_to_color.
+                 # Using standard 1000.0 divisor as per previous reference.
+                 self.depth_image = raw_depth / 1000.0
+
+            self.depth_image -= 0.0
+            self.depth_image[np.where(self.depth_image < 0)] = 0
+            
+            # Debug log to investigate "booleanize" issue
+            if self.command_count % 100 == 0:
+                d_min, d_max = np.min(self.depth_image), np.max(self.depth_image)
+                logger.info(f"Depth Stats: Shape={raw_depth.shape}, Dtype={raw_depth.dtype}, Min={d_min:.3f}, Max={d_max:.3f}")
+
+            # Prepare for gRPC (0.1mm unit uint16 PNG)
+            depth_processed = (np.clip(self.depth_image * 10000.0, 0, 65535)).astype(np.uint16)
             depth_img = PIL_Image.fromarray(depth_processed)
             dbuf = io.BytesIO()
             depth_img.save(dbuf, format='PNG', compress_level=1)
@@ -486,6 +523,7 @@ class Go2Manager(Node):
             rgb_depth_rw_lock.acquire_write()
             self.rgb_bytes = buf
             self.depth_bytes = dbuf
+            # self.rgb_image and self.depth_image already set
             self.last_rgb_received_time = time.time()
             self.last_depth_received_time = time.time()
             rgb_depth_rw_lock.release_write()
