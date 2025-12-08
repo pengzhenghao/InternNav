@@ -44,6 +44,7 @@ class SharedState:
     def __init__(self):
         self.lock = threading.RLock()
         self.latest_image_b64 = None
+        self.latest_depth_b64 = None # New depth
         self.overlay_image_b64 = None
         self.instruction = "Turn around and walk out of this office. Turn towards your slight right at the chair. Move forward to the walkway and go near the red bin. You can see an open door on your right side, go inside the open door. Stop at the computer monitor"
         self.instruction_id = 0
@@ -67,6 +68,10 @@ class SharedState:
         with self.lock:
             self.latest_image_b64 = base64.b64encode(img_bytes).decode('utf-8')
             self.last_update_time = time.time()
+            
+    def set_depth(self, img_bytes):
+        with self.lock:
+            self.latest_depth_b64 = base64.b64encode(img_bytes).decode('utf-8')
             
     def get_instruction_data(self):
         with self.lock:
@@ -139,7 +144,25 @@ class InternVLAStreamServicer(internvla_stream_pb2_grpc.InternVLAStreamServicer)
                         image_np = np.asarray(image)
                         
                         depth = Image.open(io.BytesIO(frame.depth_png)).convert('I')
-                        depth_np = np.asarray(depth).astype(np.float32) / 10000.0
+                        depth_raw = np.asarray(depth)
+
+                        # Visualization
+                        try:
+                            depth_vis = depth_raw.astype(np.float32)
+                            d_min, d_max = depth_vis.min(), depth_vis.max()
+                            if d_max > d_min:
+                                depth_vis = (depth_vis - d_min) / (d_max - d_min) * 255.0
+                            else:
+                                depth_vis = np.zeros_like(depth_vis)
+                                
+                            depth_vis_pil = Image.fromarray(depth_vis.astype(np.uint8))
+                            buf = io.BytesIO()
+                            depth_vis_pil.save(buf, format='JPEG')
+                            state.set_depth(buf.getvalue())
+                        except Exception as e:
+                            logger.error(f"Depth viz error: {e}")
+                        
+                        depth_np = depth_raw.astype(np.float32) / 10000.0
                         
                         # 4. Get Instruction
                         instruction, inst_id = state.get_instruction_data()
@@ -280,6 +303,15 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
             </div>
+            
+            <div class="card mt-4">
+                <div class="card-header bg-warning text-dark">Depth View</div>
+                <div class="card-body bg-dark p-0">
+                    <div class="image-container">
+                        <img id="depth-image" src="" alt="Waiting for depth stream..." style="width: 100%; display: block;">
+                    </div>
+                </div>
+            </div>
         </div>
         <div class="col-lg-5">
             <div class="card mb-4">
@@ -304,6 +336,10 @@ HTML_TEMPLATE = """
                 const ov = document.getElementById('overlay-image');
                 if(data.overlay_image) { ov.src = 'data:image/png;base64,' + data.overlay_image; ov.style.display = 'block'; }
                 else { ov.style.display = 'none'; }
+                
+                if (data.depth_image) {
+                    document.getElementById('depth-image').src = 'data:image/jpeg;base64,' + data.depth_image;
+                }
             }
             document.getElementById('logs').innerHTML = data.logs.map(l => `<div>${l}</div>`).join('');
             if(document.activeElement.id !== 'instruction' && document.getElementById('instruction').value !== data.instruction) {
@@ -333,16 +369,19 @@ def home():
 @app.route("/ui_data")
 def ui_data():
     img = None
+    depth = None
     overlay = None
     logs = []
     instr = ""
     with state.lock:
         img = state.latest_image_b64
+        depth = state.latest_depth_b64
         overlay = state.overlay_image_b64
         logs = list(state.logs)
         instr = state.instruction
     return jsonify({
         "image": img,
+        "depth_image": depth,
         "overlay_image": overlay,
         "logs": logs,
         "instruction": instr
