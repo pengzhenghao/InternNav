@@ -268,67 +268,138 @@ class InternVLAStreamServicer(internvla_stream_pb2_grpc.InternVLAStreamServicer)
         return None
 
 # --- Flask UI Routes ---
-# Reusing the HTML template from the original file would be good, 
-# but for brevity let's just use the same template logic or import it?
-# The original file has HTML_TEMPLATE. Let's define a similar one.
-
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>InternVLA gRPC Server</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <meta http-equiv="refresh" content="60"> <!-- Auto refresh page every 60s just in case -->
+    <meta http-equiv="refresh" content="60"> 
     <style>
-        body { background-color: #f4f6f9; }
-        .log-box { height: 250px; overflow-y: auto; background: #fff; border: 1px solid #dee2e6; padding: 10px; font-family: monospace; font-size: 0.9rem; }
-        .image-container { position: relative; width: 100%; min-height: 300px; background: #000; }
+        body { background-color: #f4f6f9; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+        .log-box { height: 200px; overflow-y: auto; background: #fff; border: 1px solid #dee2e6; padding: 10px; font-family: monospace; font-size: 0.9rem; }
+        .image-container { position: relative; width: 100%; background: #000; }
         #robot-image { width: 100%; display: block; }
         #overlay-image { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; opacity: 0.8; }
+        
+        /* Split Pane Styles */
+        #main-container { flex: 1; display: flex; overflow: hidden; }
+        #left-pane { flex: 0 0 60%; min-width: 300px; overflow-y: auto; padding: 15px; }
+        #right-pane { flex: 1; min-width: 300px; overflow-y: auto; padding: 15px; background: #fff; border-left: 1px solid #ddd; }
+        #resizer { width: 8px; background: #ccc; cursor: col-resize; flex: 0 0 auto; }
+        #resizer:hover { background: #999; }
     </style>
 </head>
 <body>
-<nav class="navbar navbar-dark bg-dark mb-4">
-    <div class="container-fluid"><span class="navbar-brand mb-0 h1">InternVLA gRPC Server</span></div>
+<nav class="navbar navbar-dark bg-dark">
+    <div class="container-fluid">
+        <span class="navbar-brand mb-0 h1">InternVLA gRPC Server</span>
+        <span class="text-light" id="connection-status">Connected</span>
+    </div>
 </nav>
-<div class="container-fluid px-4">
-    <div class="row">
-        <div class="col-lg-7 mb-4">
-            <div class="card">
-                <div class="card-header bg-primary text-white">Robot View</div>
-                <div class="card-body bg-dark p-0">
-                    <div class="image-container">
-                        <img id="robot-image" src="" alt="Waiting for stream...">
-                        <img id="overlay-image" src="" style="display:none;">
-                    </div>
-                </div>
+
+<div id="main-container">
+    <div id="left-pane">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Robot View</h5>
+                <span id="last-updated" class="badge bg-light text-dark">No Data</span>
             </div>
-            
-            <div class="card mt-4">
-                <div class="card-header bg-warning text-dark">Depth View</div>
-                <div class="card-body bg-dark p-0">
-                    <div class="image-container">
-                        <img id="depth-image" src="" alt="Waiting for depth stream..." style="width: 100%; display: block;">
-                    </div>
+            <div class="card-body bg-dark p-0">
+                <div class="image-container">
+                    <img id="robot-image" src="" alt="Waiting for stream...">
+                    <img id="overlay-image" src="" style="display:none;">
                 </div>
             </div>
         </div>
-        <div class="col-lg-5">
-            <div class="card mb-4">
-                <div class="card-header bg-success text-white">Instruction</div>
-                <div class="card-body">
-                    <textarea class="form-control mb-2" id="instruction" rows="4"></textarea>
-                    <button class="btn btn-success w-100" onclick="updateInstruction()">Update Instruction</button>
+        
+        <div class="card">
+            <div class="card-header bg-warning text-dark">
+                <h5 class="mb-0">Depth View</h5>
+            </div>
+            <div class="card-body bg-dark p-0">
+                <div class="image-container">
+                    <img id="depth-image" src="" alt="Waiting for depth stream..." style="width: 100%; display: block;">
                 </div>
             </div>
-            <div class="card">
-                <div class="card-header bg-secondary text-white">Logs</div>
-                <div class="card-body p-0"><div id="logs" class="log-box"></div></div>
+        </div>
+    </div>
+    
+    <div id="resizer"></div>
+    
+    <div id="right-pane">
+        <!-- Instruction Panel -->
+        <div class="card mb-4">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0">Control Instruction</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-2">
+                    <label for="instruction" class="form-label">
+                        Current Goal: <span class="badge bg-info text-dark" id="inst-tag">inst0</span>
+                    </label>
+                    <textarea class="form-control" id="instruction" rows="3"></textarea>
+                </div>
+                <button class="btn btn-success w-100" onclick="updateInstruction()">Update Instruction</button>
+            </div>
+        </div>
+        
+        <!-- Logs Panel -->
+        <div class="card mb-4">
+            <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">System Logs</h5>
+                <button class="btn btn-sm btn-light" onclick="document.getElementById('logs').innerHTML=''">Clear</button>
+            </div>
+            <div class="card-body p-0">
+                <div id="logs" class="log-box"></div>
+            </div>
+        </div>
+
+        <!-- Model Details Panel -->
+        <div class="card">
+            <div class="card-header bg-info text-dark d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Model Details</h5>
+                <button class="btn btn-sm btn-light" onclick="document.getElementById('model-logs').innerHTML=''">Clear</button>
+            </div>
+            <div class="card-body p-0">
+                <div id="model-logs" class="log-box"></div>
             </div>
         </div>
     </div>
 </div>
+
 <script>
+    // Resizer Logic
+    const resizer = document.getElementById('resizer');
+    const leftPane = document.getElementById('left-pane');
+    const mainContainer = document.getElementById('main-container');
+    let isResizing = false;
+
+    resizer.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        document.body.style.cursor = 'col-resize';
+        resizer.style.background = '#999';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isResizing) return;
+        const containerRect = mainContainer.getBoundingClientRect();
+        // Calculate percentage
+        let newWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+        if(newWidth < 10) newWidth = 10;
+        if(newWidth > 90) newWidth = 90;
+        leftPane.style.flex = `0 0 ${newWidth}%`;
+        e.preventDefault();
+    });
+
+    document.addEventListener('mouseup', () => {
+        if(isResizing) {
+            isResizing = false;
+            document.body.style.cursor = 'default';
+            resizer.style.background = '#ccc';
+        }
+    });
+
     function fetchUpdates() {
         fetch('/ui_data').then(r => r.json()).then(data => {
             if(data.image) {
@@ -340,20 +411,37 @@ HTML_TEMPLATE = """
                 if (data.depth_image) {
                     document.getElementById('depth-image').src = 'data:image/jpeg;base64,' + data.depth_image;
                 }
+                
+                document.getElementById('last-updated').innerText = 'Last: ' + new Date().toLocaleTimeString();
             }
-            document.getElementById('logs').innerHTML = data.logs.map(l => `<div>${l}</div>`).join('');
+            
+            // Update Logs
+            document.getElementById('logs').innerHTML = data.logs.map(l => `<div style="border-bottom:1px solid #eee;">${l}</div>`).join('');
+            
+            // Update Model Logs
+            if (data.model_logs) {
+                document.getElementById('model-logs').innerHTML = data.model_logs.map(l => `<div style="border-bottom:1px solid #eee;">${l}</div>`).join('');
+            }
+
+            // Update Instruction ID
+            if (data.instruction_id !== undefined) {
+                document.getElementById('inst-tag').innerText = 'inst' + data.instruction_id;
+            }
+
             if(document.activeElement.id !== 'instruction' && document.getElementById('instruction').value !== data.instruction) {
                 document.getElementById('instruction').value = data.instruction;
             }
-        }).finally(() => setTimeout(fetchUpdates, 500));
+        }).catch(e => console.error(e)).finally(() => setTimeout(fetchUpdates, 500));
     }
     
     function updateInstruction() {
         const txt = document.getElementById('instruction').value;
+        const btn = document.querySelector('button[onclick="updateInstruction()"]');
+        btn.disabled = true; btn.innerText = "Updating...";
         fetch('/set_instruction', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({instruction: txt})
-        });
+        }).finally(() => { btn.disabled = false; btn.innerText = "Update Instruction"; });
     }
     
     fetchUpdates();
@@ -372,19 +460,25 @@ def ui_data():
     depth = None
     overlay = None
     logs = []
+    model_logs = []
     instr = ""
+    inst_id = 0
     with state.lock:
         img = state.latest_image_b64
         depth = state.latest_depth_b64
         overlay = state.overlay_image_b64
         logs = list(state.logs)
+        model_logs = list(state.model_logs)
         instr = state.instruction
+        inst_id = state.instruction_id
     return jsonify({
         "image": img,
         "depth_image": depth,
         "overlay_image": overlay,
         "logs": logs,
-        "instruction": instr
+        "model_logs": model_logs,
+        "instruction": instr,
+        "instruction_id": inst_id
     })
 
 @app.route("/set_instruction", methods=['POST'])
