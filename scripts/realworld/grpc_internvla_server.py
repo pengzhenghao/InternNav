@@ -411,6 +411,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--model_path", type=str, default=str(CHECKPOINT_DIR / "InternVLA-N1"))
+    parser.add_argument("--resize_w", type=int, default=384)
+    parser.add_argument("--resize_h", type=int, default=384)
+    parser.add_argument("--num_history", type=int, default=8)
+    parser.add_argument("--plan_step_gap", type=int, default=8)
     parser.add_argument("--port", type=int, default=5801) # gRPC port
     parser.add_argument("--http_port", type=int, default=5802) # Flask port
     args = parser.parse_args()
