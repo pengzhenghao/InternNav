@@ -95,6 +95,14 @@ class InternVLAStreamServicer(internvla_stream_pb2_grpc.InternVLAStreamServicer)
         self.idx = 0
         self.start_time = time.time()
         self.output_dir = ''
+        # Build a mapping from discrete action index to human-readable label (e.g., STOP, ↑)
+        self.action_map = {}
+        if hasattr(self.agent, 'actions2idx'):
+            for k, v in self.agent.actions2idx.items():
+                if isinstance(v, list) and len(v) > 0:
+                    self.action_map[v[0]] = k
+                else:
+                    self.action_map[v] = k
         
     def Stream(self, request_iterator, context):
         client_id = "unknown"
@@ -196,7 +204,15 @@ class InternVLAStreamServicer(internvla_stream_pb2_grpc.InternVLAStreamServicer)
                         
                         if output.output_action is not None:
                             action_msg.discrete_action.extend(output.output_action)
-                            log_parts.append(f"Act: {output.output_action}")
+                            # Translate discrete action indices into human-readable text (e.g., STOP, ↑)
+                            if self.action_map:
+                                action_texts = [self.action_map.get(a, f"Unknown({a})") for a in output.output_action]
+                                action_str = ", ".join(action_texts)
+                                log_parts.append(f"Action {action_str} ({output.output_action})")
+                                # Also push detailed info to model log panel
+                                state.add_model_log(f"Discrete Action: {action_str} {output.output_action}")
+                            else:
+                                log_parts.append(f"Act: {output.output_action}")
                             
                         if hasattr(output, 'output_trajectory') and output.output_trajectory is not None:
                             # Flatten trajectory
@@ -204,8 +220,31 @@ class InternVLAStreamServicer(internvla_stream_pb2_grpc.InternVLAStreamServicer)
                             action_msg.trajectory.extend(traj_flat)
                             log_parts.append(f"Traj len: {len(output.output_trajectory)}")
                             
+                            # Add richer trajectory info to model logs similar to interactive server
+                            traj = output.output_trajectory
+                            try:
+                                state.add_model_log(f"Trajectory Shape: {traj.shape}, Type: Continuous")
+                                if len(traj) > 0:
+                                    sample_str = f"Start: {np.round(traj[0], 2)}, End: {np.round(traj[-1], 2)}"
+                                    state.add_model_log(f"Sample: {sample_str}")
+                            except Exception as e:
+                                logger.error(f"Error logging trajectory details: {e}")
+                            
                         if hasattr(output, 'output_pixel') and output.output_pixel is not None:
                             action_msg.pixel_goal.extend(output.output_pixel)
+                            # Log pixel goal in model logs
+                            try:
+                                state.add_model_log(f"Pixel Goal: {output.output_pixel}")
+                            except Exception as e:
+                                logger.error(f"Error logging pixel goal: {e}")
+                        
+                        # If nothing meaningful came out of the model, still add a model log entry
+                        if (
+                            output.output_action is None
+                            and not getattr(output, 'output_trajectory', None)
+                            and not getattr(output, 'output_pixel', None)
+                        ):
+                            state.add_model_log("No valid output from model.")
                         
                         # Visualization for UI (Overlay)
                         overlay_b64 = self._generate_overlay(image_np, output)
@@ -214,7 +253,12 @@ class InternVLAStreamServicer(internvla_stream_pb2_grpc.InternVLAStreamServicer)
                             with state.lock:
                                 state.overlay_image_b64 = overlay_b64
                         
-                        action_msg.log = f"Step {self.idx} (inst{inst_id}): " + ", ".join(log_parts) + f" ({t1-t0:.3f}s)"
+                        # Log step summary; the final number is the model latency for this frame.
+                        action_msg.log = (
+                            f"Step {self.idx} (inst{inst_id}): "
+                            + ", ".join(log_parts)
+                            + f" (latency={t1-t0:.3f}s)"
+                        )
                         state.add_log(action_msg.log)
                         
                         yield internvla_stream_pb2.ServerMessage(action=action_msg)
@@ -308,6 +352,10 @@ HTML_TEMPLATE = """
                 <div class="image-container">
                     <img id="robot-image" src="" alt="Waiting for stream...">
                     <img id="overlay-image" src="" style="display:none;">
+                    <!-- Tiny age label overlayed on the image -->
+                    <span id="frame-age" class="position-absolute bottom-0 end-0 m-1 px-2 py-1 bg-dark bg-opacity-75 text-light small rounded">
+                        frame --.-s ago
+                    </span>
                 </div>
             </div>
         </div>
@@ -368,6 +416,8 @@ HTML_TEMPLATE = """
 </div>
 
 <script>
+    let lastFrameStaleSeconds = 0; // track how long frame has been missing for UI warning
+
     // Resizer Logic
     const resizer = document.getElementById('resizer');
     const leftPane = document.getElementById('left-pane');
@@ -401,10 +451,10 @@ HTML_TEMPLATE = """
 
     function fetchUpdates() {
         fetch('/ui_data').then(r => r.json()).then(data => {
-            if(data.image) {
+            if (data.image) {
                 document.getElementById('robot-image').src = 'data:image/jpeg;base64,' + data.image;
                 const ov = document.getElementById('overlay-image');
-                if(data.overlay_image) { ov.src = 'data:image/png;base64,' + data.overlay_image; ov.style.display = 'block'; }
+                if (data.overlay_image) { ov.src = 'data:image/png;base64,' + data.overlay_image; ov.style.display = 'block'; }
                 else { ov.style.display = 'none'; }
                 
                 if (data.depth_image) {
@@ -412,6 +462,39 @@ HTML_TEMPLATE = """
                 }
                 
                 document.getElementById('last-updated').innerText = 'Last: ' + new Date().toLocaleTimeString();
+
+                // Update tiny "frame xx.s ago" label and warn if stale
+                if (data.last_update_time !== undefined && data.last_update_time !== null) {
+                    const nowSec = Date.now() / 1000;
+                    const age = nowSec - data.last_update_time;
+                    if (!isNaN(age)) {
+                        const ageLabel = document.getElementById('frame-age');
+                        if (ageLabel) {
+                            ageLabel.innerText = 'frame ' + age.toFixed(1) + 's ago';
+                        }
+
+                        // If frame is older than 1s, add a light-weight system warning to logs
+                        if (age > 1.0) {
+                            const rounded = Math.round(age);
+                            if (rounded !== lastFrameStaleSeconds) {
+                                const logsDiv = document.getElementById('logs');
+                                const warn = document.createElement('div');
+                                warn.style.color = 'red';
+                                warn.style.borderBottom = '1px solid #eee';
+                                const ts = new Date().toLocaleTimeString();
+                                warn.innerHTML = `[${ts}] <b>WARNING</b>: frame missing for ${rounded}s`;
+                                if (logsDiv.firstChild) {
+                                    logsDiv.insertBefore(warn, logsDiv.firstChild);
+                                } else {
+                                    logsDiv.appendChild(warn);
+                                }
+                                lastFrameStaleSeconds = rounded;
+                            }
+                        } else {
+                            lastFrameStaleSeconds = 0;
+                        }
+                    }
+                }
             }
             
             // Update Logs
@@ -462,6 +545,7 @@ def ui_data():
     model_logs = []
     instr = ""
     inst_id = 0
+    last_update_time = 0
     with state.lock:
         img = state.latest_image_b64
         depth = state.latest_depth_b64
@@ -470,6 +554,7 @@ def ui_data():
         model_logs = list(state.model_logs)
         instr = state.instruction
         inst_id = state.instruction_id
+        last_update_time = state.last_update_time
     return jsonify({
         "image": img,
         "depth_image": depth,
@@ -477,7 +562,8 @@ def ui_data():
         "logs": logs,
         "model_logs": model_logs,
         "instruction": instr,
-        "instruction_id": inst_id
+        "instruction_id": inst_id,
+        "last_update_time": last_update_time
     })
 
 @app.route("/set_instruction", methods=['POST'])
