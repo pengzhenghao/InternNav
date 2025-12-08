@@ -31,6 +31,7 @@ class SharedState:
     def __init__(self):
         self.lock = threading.RLock()
         self.latest_image_b64 = None
+        self.latest_depth_b64 = None # New depth
         self.overlay_image_b64 = None # New overlay
         # Default instruction from the original script
         self.instruction = "Turn around and walk out of this office. Turn towards your slight right at the chair. Move forward to the walkway and go near the red bin. You can see an open door on your right side, go inside the open door. Stop at the computer monitor"
@@ -73,6 +74,10 @@ class SharedState:
             self.latest_image_b64 = base64.b64encode(img_bytes).decode('utf-8')
             self.last_update_time = time.time()
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Leave set_image")
+        
+    def set_depth(self, img_bytes):
+        with self.lock:
+            self.latest_depth_b64 = base64.b64encode(img_bytes).decode('utf-8')
             
     def get_last_update_time(self): 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Getting last update time")
@@ -147,6 +152,18 @@ HTML_TEMPLATE = """
                      <small class="text-muted" id="image-info">Waiting for first frame...</small>
                 </div>
             </div>
+            
+            <!-- Depth View -->
+            <div class="card mt-4">
+                <div class="card-header bg-warning text-dark">
+                    <h5 class="mb-0">Depth View</h5>
+                </div>
+                <div class="card-body text-center p-2 bg-dark">
+                    <div class="image-container">
+                        <img id="depth-image" src="" alt="Depth Camera Feed" style="width: 100%; display: block;">
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Right Column: Controls & Logs -->
@@ -213,6 +230,10 @@ HTML_TEMPLATE = """
                         overlay.style.display = 'block';
                     } else {
                         overlay.style.display = 'none';
+                    }
+                    
+                    if (data.depth_image) {
+                        document.getElementById('depth-image').src = 'data:image/jpeg;base64,' + data.depth_image;
                     }
 
                     document.getElementById('last-updated').innerText = 'Last: ' + new Date().toLocaleTimeString();
@@ -347,6 +368,7 @@ def ui_data():
     
     # Copy data out of the lock critical section to minimize blocking
     img = None
+    depth_img = None
     overlay_img = None
     logs = []
     instr = ""
@@ -362,6 +384,7 @@ def ui_data():
     try:
         #         print(f"[{datetime.now().strftime('%H:%M:%S')}] Acquired lock in ui_data")
         img = state.latest_image_b64
+        depth_img = state.latest_depth_b64
         overlay_img = state.overlay_image_b64
         logs = list(state.logs) # Create a shallow copy
         model_logs = list(state.model_logs)
@@ -375,6 +398,7 @@ def ui_data():
     
     data = jsonify({
         "image": img,
+        "depth_image": depth_img,
         "overlay_image": overlay_img,
         "logs": logs,
         "model_logs": model_logs,
@@ -428,8 +452,25 @@ def eval_dual():
 
     depth = Image.open(depth_file.stream)
     depth = depth.convert('I')
-    depth = np.asarray(depth)
-    depth = depth.astype(np.float32) / 10000.0
+    depth_raw = np.asarray(depth)
+    
+    # Visualization: Normalize to 0-255
+    try:
+        depth_vis = depth_raw.astype(np.float32)
+        d_min, d_max = depth_vis.min(), depth_vis.max()
+        if d_max > d_min:
+            depth_vis = (depth_vis - d_min) / (d_max - d_min) * 255.0
+        else:
+            depth_vis = np.zeros_like(depth_vis)
+            
+        depth_vis_pil = Image.fromarray(depth_vis.astype(np.uint8))
+        buf = io.BytesIO()
+        depth_vis_pil.save(buf, format='JPEG')
+        state.set_depth(buf.getvalue())
+    except Exception as e:
+        print(f"Error creating depth visualization: {e}")
+
+    depth = depth_raw.astype(np.float32) / 10000.0
     
     read_time = time.time() - start_process_time
     # state.add_log(f"Received request. Read time: {read_time:.3f}s. Res: {resolution}")
