@@ -54,10 +54,9 @@ from unitree_api.msg import Request
 from example_interfaces.srv import SetBool
 
 # Add project root to path for proto imports
-project_root = pathlib.Path(__file__).parent.parent.parent.resolve()
-sys.path.insert(0, str(project_root))
-# Add protos dir to path so generated code imports work
-sys.path.insert(0, str(project_root / 'scripts/realworld/protos'))
+# Determine path to protos based on current script location, valid for both host and container
+current_dir = pathlib.Path(__file__).parent.resolve()
+sys.path.insert(0, str(current_dir / 'protos'))
 
 import internvla_stream_pb2
 import internvla_stream_pb2_grpc
@@ -390,7 +389,8 @@ class Go2Manager(Node):
     def __init__(self):
         super().__init__('go2_manager')
         
-        self.declare_parameter('dry_run', False)
+        default_dry_run = os.environ.get('DRY_RUN', '0') == '1'
+        self.declare_parameter('dry_run', default_dry_run)
         self.dry_run = self.get_parameter('dry_run').get_parameter_value().bool_value
         
         self.declare_parameter('use_compressed', True)
@@ -548,10 +548,9 @@ class Go2Manager(Node):
                 self.command_count = 0
                 self.last_command_log_time = time.time()
         else:
-            req = Twist()
-            req.linear.x = float(vx)
-            req.linear.y = 0.0
-            req.angular.z = float(vyaw)
+            req = Request()
+            req.header.identity.api_id = 1008
+            req.parameter = json.dumps({"x": float(vx), "y": float(vy), "z": float(vyaw)})
             self.control_pub.publish(req)
 
     def set_dry_run_cb(self, request, response):
