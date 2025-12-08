@@ -900,10 +900,19 @@ class Go2Manager(Node):
                 logger.debug(f"[DRY RUN] Command suppressed: vx={vx:.3f}, vy={vy:.3f}, vyaw={vyaw:.3f}")
         else:
             # Normal operation: send command to robot
-            request = Twist()
-            request.linear.x = vx
-            request.linear.y = 0.0
-            request.angular.z = vyaw
+            # Construct Unitree Request message for Go2
+            SPORT_API_ID_MOVE = 1008
+            
+            p = {"x": vx, "y": vy, "z": vyaw}
+            parameter = json.dumps(p)
+            
+            header = RequestHeader()
+            header.identity.api_id = SPORT_API_ID_MOVE
+            header.identity.id = int(time.monotonic_ns())
+            
+            request = Request()
+            request.header = header
+            request.parameter = parameter
             
             self.control_pub.publish(request)
             logger.debug(f"Control command sent: vx={vx:.3f} m/s, vy={vy:.3f} m/s, vyaw={vyaw:.3f} rad/s")
