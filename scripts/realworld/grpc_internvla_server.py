@@ -274,7 +274,6 @@ HTML_TEMPLATE = """
 <head>
     <title>InternVLA gRPC Server</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <meta http-equiv="refresh" content="60"> 
     <style>
         body { background-color: #f4f6f9; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
         .log-box { height: 200px; overflow-y: auto; background: #fff; border: 1px solid #dee2e6; padding: 10px; font-family: monospace; font-size: 0.9rem; }
