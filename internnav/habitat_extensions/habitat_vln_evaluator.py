@@ -323,14 +323,14 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             local_actions = []
 
             done = False
+            done_by_env_flag = False
 
             # ---------- 2. Episode step loop -----------
             while (not done) and (step_id <= self.max_steps_per_episode):
 
-                print("debug: step_id", step_id)
-                print("debug: done", done)
-                print("debug: max_steps_per_episode", self.max_steps_per_episode)
-
+                # print("debug: step_id", step_id)
+                # print("debug: done", done)
+                # print("debug: max_steps_per_episode", self.max_steps_per_episode)
 
                 # Standard Agent Interface Branch
                 if hasattr(self, 'agent') and self.agent is not None:
@@ -455,7 +455,17 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         observations, _, done, _ = self.env.step(action)
                     else:
                         observations, _, done, _ = self.env.step(action)
-                    
+
+                    if done and not done_by_env_flag:
+                        logger.info(
+                            "Episode termination: Habitat env returned done=True after agent action=%s at step_id=%d "
+                            "(max_steps_per_episode=%d).",
+                            action,
+                            step_id,
+                            self.max_steps_per_episode,
+                        )
+                        done_by_env_flag = True
+
                     step_id += 1
                     continue
 
@@ -749,8 +759,40 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                     step_id += 1
                     messages = []
 
+                if done and not done_by_env_flag:
+                    logger.info(
+                        "Episode termination: Habitat env returned done=True after planner action=%s at step_id=%d "
+                        "(max_steps_per_episode=%d).",
+                        action,
+                        step_id,
+                        self.max_steps_per_episode,
+                    )
+                    done_by_env_flag = True
+
             # ---------- 3. End of episode -----------
             # Update result and write progress to the output_path/progress.json
+
+            # Explicitly log who/what terminated the episode.
+            if done_by_env_flag:
+                logger.info(
+                    "Episode termination summary: env done flag triggered end at step_id=%d (max_steps_per_episode=%d).",
+                    step_id,
+                    self.max_steps_per_episode,
+                )
+            elif step_id > self.max_steps_per_episode:
+                logger.info(
+                    "Episode termination summary: evaluator step limit reached (step_id=%d > max_steps_per_episode=%d).",
+                    step_id,
+                    self.max_steps_per_episode,
+                )
+            else:
+                logger.info(
+                    "Episode termination summary: loop exited without env done flag or explicit step limit "
+                    "(env.is_running=%s, step_id=%d, max_steps_per_episode=%d).",
+                    self.env.is_running,
+                    step_id,
+                    self.max_steps_per_episode,
+                )
 
             process_bar.update(1)
 
