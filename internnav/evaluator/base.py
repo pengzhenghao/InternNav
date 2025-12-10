@@ -27,7 +27,9 @@ class Evaluator:
         def decorator(evaluator_class):
             if evaluator_type in cls.evaluators:
                 raise ValueError(f"Evaluator {evaluator_type} already registered.")
+            print(f"Registering evaluator {evaluator_type}")
             cls.evaluators[evaluator_type] = evaluator_class
+            return evaluator_class
 
         return decorator
 
