@@ -53,6 +53,11 @@ class VLMNavigator:
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.user_goal = user_goal
         self.history: List[Dict] = []
+        self.last_instruction = None
+        self.last_note = None
+        self.dump_dir: Optional[str] = None
+        self.dump_freq: int = 1
+        self.dump_episode_id: Optional[int] = None
         self._init_history()
         logger.info(
             f"[INIT] VLMNavigator -> model={self.model_name}, goal='{self.user_goal}'"
@@ -75,7 +80,8 @@ You must output a JSON object:
 {{
   "thought": "Your reasoning here...",
   "status": "NAVIGATING" | "SEARCHING" | "DONE",
-  "instruction": "Short phrase for System 2 (e.g. 'Go to the door')"
+  "instruction": "Short phrase for System 2 (e.g. 'Go to the door')",
+  "note": "One-line summary of the current scenario/progress to remind yourself in the next step"
 }}
 """
         self.history.append({"role": "system", "content": system_prompt})
@@ -104,7 +110,7 @@ You must output a JSON object:
             start = response_text.find("{")
             end = response_text.rfind("}") + 1
             if start == -1 or end == 0:
-                logger.error("Could not find JSON in response")
+                logger.error("Could not find JSON in response:", response_text)
                 return None
 
             json_str = response_text[start:end]
@@ -117,6 +123,7 @@ You must output a JSON object:
             "thought": plan.get("thought", ""),
             "status": plan.get("status", "NAVIGATING"),
             "instruction": plan.get("instruction", ""),
+            "note": plan.get("note", ""),
         }
 
     def plan_next_step(self, img_b64: str) -> Optional[Dict[str, str]]:
@@ -130,8 +137,14 @@ You must output a JSON object:
         if not img_b64:
             return None
 
-        user_msg = self.build_user_message(img_b64)
+        # Keep the user query minimal; rely on message history for context
+        query = "Please provide a navigation instruction for the local navigation system."
+
+        user_msg = self.build_user_message(img_b64, query=query)
         messages = self.history + [user_msg]
+
+        # Persist the full messages for debugging / inspection
+        self._dump_messages(messages, query)
 
         try:
             completion = self.client.chat.completions.create(
@@ -154,22 +167,61 @@ You must output a JSON object:
         thought = plan["thought"]
         status = plan["status"]
         instruction = plan["instruction"]
+        note = plan["note"]
+        step_idx = self.history.__len__() // 2  # each assistant add bumps this
 
         logger.info(
-            f"[Sys3] Step {self.history.__len__()//2} | status={status} | instruction='{instruction}' | "
-            f"thought='{thought[:80]}...'"
+            f"\n[Sys3] Step {step_idx}\n"
+            f"  Status      : {status}\n"
+            f"  Instruction : {instruction}\n"
+            f"  Note        : {note}\n"
+            f"  Thought     : {thought[:400]}\n"
         )
+
 
         # Maintain a compact text-only summary to keep context small
         if instruction or thought:
             self.history.append(
                 {
                     "role": "assistant",
-                    "content": f"Action taken: {instruction}. Status: {status}. Reason: {thought}",
+                    "content": (
+                        f"[Step {step_idx} | {time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"Status: {status}. Instruction: {instruction}. Note: {note}. Thought: {thought}"
+                    ),
                 }
             )
+            # Update history trackers
+            self.last_instruction = instruction
+            self.last_note = note
 
         return plan
+
+    def _dump_messages(self, messages: List[Dict], query: str) -> None:
+        """
+        Dump the full messages to disk.
+        - latest.json : always overwritten with the latest request
+        - <episode>_step_XXXX.json : saved every dump_freq steps (default every step)
+        """
+        try:
+            os.makedirs(self.dump_dir, exist_ok=True)
+            step_id = len([m for m in self.history if m.get("role") == "assistant"])
+            payload = {
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "step": step_id,
+                "query": query,
+                "messages": messages,
+            }
+            episode_str = (
+                f"{self.dump_episode_id:04d}"
+                if self.dump_episode_id is not None
+                else "0000"
+            )
+            step_path = os.path.join(self.dump_dir, f"{episode_str}.json")
+            print("in _dump_messages, step_path:", step_path)
+            with open(step_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[Sys3] Failed to write prompt log: {e}")
 
 def pil_to_base64(image: Image.Image) -> str:
     buffered = BytesIO()
@@ -182,6 +234,13 @@ class System3Agent(InternVLAN1Agent):
         super().__init__(config)
         self.navigator: Optional[VLMNavigator] = None
         self.current_instruction = None
+        self.prompt_dump_dir: Optional[str] = None
+        self.prompt_dump_freq: int = 1
+        self.prompt_dump_episode_id: Optional[int] = None
+        # Throttle System3 invocations to avoid over-calling VLM.
+        # Defaults: allow a new Sys3 call every 2 macro steps.
+        self.sys3_interval_steps: int = config.model_settings.get("sys3_interval_steps", 2)
+        self.last_sys3_step: int = -self.sys3_interval_steps
         
         # Load System 3 config from config, fallback to env
         model_settings = config.model_settings
@@ -208,7 +267,26 @@ class System3Agent(InternVLAN1Agent):
             base_url=self.vlm_base_url,
             model_name=self.vlm_model_name
         )
+        if self.prompt_dump_dir:
+            self.navigator.dump_dir = self.prompt_dump_dir
+            self.navigator.dump_freq = self.prompt_dump_freq
+            self.navigator.dump_episode_id = self.prompt_dump_episode_id
         self.current_instruction = goal # Default to original until VLM updates it
+
+    def set_prompt_dump(self, dump_dir: str, freq: int = 1, episode_id: Optional[int] = None):
+        """Configure where/how often to dump prompts."""
+        assert dump_dir is not None, "dump_dir cannot be None"
+        self.prompt_dump_dir = dump_dir
+        self.prompt_dump_freq = max(1, freq)
+        self.prompt_dump_episode_id = episode_id
+        if self.navigator:
+            self.navigator.dump_dir = dump_dir
+            self.navigator.dump_freq = self.prompt_dump_freq
+            self.navigator.dump_episode_id = episode_id
+        logger.info(
+            f"[Sys3] Prompt dump configured: dump_dir={dump_dir}, freq={self.prompt_dump_freq}, "
+            f"episode_id={episode_id}"
+        )
 
     def step(self, obs: List[Dict[str, Any]]):
         # Handle single observation (batch size 1)
@@ -219,15 +297,16 @@ class System3Agent(InternVLAN1Agent):
         # We check self.should_infer_s2(self.mode) OR if we are looking down (which forces inference)
         # Note: 'look_down' logic is handled in super().step, but we need to know if we should update instruction now.
         if self.navigator:
-            if self.should_infer_s2(self.mode) or self.look_down:
-                # logger.info(f"[Sys3] Inference needed (step {self.episode_step}). Calling VLM...")
-                
+            should_call_sys3 = self.should_infer_s2(self.mode) or self.look_down
+            interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
+            if should_call_sys3 and interval_ok:
                 # Convert numpy array to PIL Image
                 image = Image.fromarray(rgb.astype('uint8'), 'RGB')
                 img_b64 = pil_to_base64(image)
                 
                 # Plan next step
                 plan = self.navigator.plan_next_step(img_b64)
+                self.last_sys3_step = self.episode_step
                 
                 if plan:
                     if plan.get("status") == "DONE":

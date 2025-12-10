@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from enum import IntEnum
 
 sys.path.append('./src/diffusion-policy')
@@ -68,7 +69,10 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         self.save_video = args.save_video
         self.epoch = args.epoch
         self.max_steps_per_episode = args.max_steps_per_episode
-        self.output_path = args.output_path
+        # Append a timestamped run id to log directory to avoid collisions
+        run_ts = time.strftime("%Y%m%d_%H%M%S")
+        self.run_ts = run_ts
+        self.output_path = os.path.join(args.output_path, run_ts)
 
         # create habitat config
         self.config_path = cfg.env.env_settings['config_path']
@@ -101,37 +105,41 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         cfg.env.env_settings['output_path'] = self.output_path
 
         # init agent and env
-        super().__init__(cfg, init_agent=False)
+        self.model_args = argparse.Namespace(**cfg.agent.model_settings)
+        # For legacy modes 'dual_system' and 'system2', we manually load the model later.
+        # For other modes (like 'system3'), we let the parent initialize the agent.
+        init_agent = self.model_args.mode not in ['dual_system', 'system2']
+        super().__init__(cfg, init_agent=init_agent)
 
         # ------------------------------------- model ------------------------------------------
-        self.model_args = argparse.Namespace(**cfg.agent.model_settings)
+        # Only manually load model if we didn't init an agent (legacy modes)
+        if not init_agent:
+            processor = AutoProcessor.from_pretrained(self.model_args.model_path)
+            processor.tokenizer.padding_side = 'left'
 
-        processor = AutoProcessor.from_pretrained(self.model_args.model_path)
-        processor.tokenizer.padding_side = 'left'
+            device = torch.device(f"cuda:{self.local_rank}")
+            if self.model_args.mode == 'dual_system':
+                model = InternVLAN1ForCausalLM.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
+            elif self.model_args.mode == 'system2':
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
+            else:
+                raise ValueError(f"Invalid mode: {self.model_args.mode}")
 
-        device = torch.device(f"cuda:{self.local_rank}")
-        if self.model_args.mode == 'dual_system':
-            model = InternVLAN1ForCausalLM.from_pretrained(
-                self.model_args.model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map={"": device},
-            )
-        elif self.model_args.mode == 'system2':
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.model_args.model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map={"": device},
-            )
-        else:
-            raise ValueError(f"Invalid mode: {self.model_args.mode}")
+            model.eval()
+            self.device = device
 
-        model.eval()
-        self.device = device
-
-        self.model = model
-        self.processor = processor
+            self.model = model
+            self.processor = processor
 
         # refactor: this part used in three places
         prompt = "You are an autonomous navigation assistant. Your task is to <instruction>. Where should you go next to stay on track? Please output the next waypoint\'s coordinates in the image. Please output STOP when you have successfully completed the task."
