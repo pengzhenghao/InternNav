@@ -177,7 +177,7 @@ class InternVLAN1Net(PreTrainedModel):
         self.llm_output = self.processor.tokenizer.decode(
             output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
         )
-        print(f"============ output {self.episode_idx}  {self.llm_output}")
+        # print(f"============ output {self.episode_idx}  {self.llm_output}")
         output = S2Output()
 
         # 4. Post-process results

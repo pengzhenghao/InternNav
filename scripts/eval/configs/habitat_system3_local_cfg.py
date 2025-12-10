@@ -5,7 +5,7 @@ eval_cfg = EvalCfg(
     agent=AgentCfg(
         model_name='system3',
         model_settings={
-            "mode": "system3",  # inference mode
+            "mode": "system3",  # Used by Evaluator to determine flow
             "infer_mode": "sync", # Used by InternVLAN1Agent
             "policy_name": "InternVLAN1_Policy", # Required by InternVLAN1Agent
             
@@ -27,25 +27,22 @@ eval_cfg = EvalCfg(
             "predict_step_nums": 32,
             "continuous_traj": True,
             "max_new_tokens": 1024,
-            "vis_debug": False,
+            "vis_debug": False, # InternVLAN1Agent needs this
         },
     ),
     env=EnvCfg(
         env_type='habitat',
         env_settings={
-            # habitat sim specifications - agent, sensors, tasks, measures etc. are defined in the habitat config file
-            'config_path': 'scripts/eval/configs/vln_r2r.yaml',
+            'config_path': 'scripts/eval/configs/vln_r2r_local.yaml',
         },
     ),
     eval_type='habitat_vln',
     eval_settings={
-        # all current parse args
-        "output_path": "./logs/habitat/test_system3",  # output directory for logs/results
-        "save_video": True,  # whether to save videos
-        "epoch": 0,  # epoch number for logging
-        "max_steps_per_episode": 500,  # maximum steps per episode
-        # distributed settings
-        "port": "2334",  # communication port
-        "dist_url": "env://",  # url for distributed setup
+        "output_path": "./logs/habitat/test_system3_local",
+        "save_video": True,
+        "epoch": 0,
+        "max_steps_per_episode": 500,
+        "port": "2334",
+        "dist_url": "env://",
     },
 )

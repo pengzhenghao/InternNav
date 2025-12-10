@@ -2,6 +2,7 @@ import copy
 import os
 import threading
 import time
+import logging
 
 import cv2
 import imageio
@@ -16,6 +17,10 @@ from internnav.configs.model.base_encoders import ModelCfg
 from internnav.model import get_config, get_policy
 from internnav.model.utils.misc import set_random_seed
 from internnav.model.utils.vln_utils import S1Input, S1Output, S2Input, S2Output
+
+
+logger = logging.getLogger("InternVLAN1Agent")
+logger.setLevel(logging.INFO)
 
 
 @Agent.register('internvla_n1')
@@ -165,7 +170,7 @@ class InternVLAN1Agent(Agent):
                             self.s2_input.look_down,
                         )
                 except Exception as e:
-                    print(f"s2 infer error: {e}")
+                    logger.error(f"[Sys2] s2 infer error: {e}")
                     self.s2_output.is_infering = False
                     self.policy.reset()
                     success = False
@@ -180,7 +185,7 @@ class InternVLAN1Agent(Agent):
                             False,
                         )
                     except Exception as e:
-                        print(f"s2 infer error: {e}")
+                        logger.error(f"[Sys2] s2 infer error: {e}")
                         self.s2_output.is_infering = False
                         self.policy.reset()
                         self.s2_output.output_pixel = None
@@ -188,10 +193,10 @@ class InternVLAN1Agent(Agent):
                         self.s2_output.output_latent = None
                         continue
 
-                print("s2 infer finish!!")
+                # print("s2 infer finish!!")
                 # Update output state
                 with self.s2_output_lock:
-                    print("get s2 output lock")
+                    # print("get s2 output lock")
                     # S2 output
 
                     self.s2_output.output_pixel = current_s2_output.output_pixel
@@ -249,9 +254,9 @@ class InternVLAN1Agent(Agent):
         instruction = obs['instruction']
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
 
-        # S2 inference is done in a separate thread
+        # S2 inference is done in the separate thread
         if self.should_infer_s2(mode) or self.look_down:  # The look down frame must be inferred
-            print(f"======== Infer S2 at step {self.episode_step}========")
+            # logger.info(f"[Sys2] Infer S2 at step {self.episode_step}")
             with self.s2_input_lock:
                 self.s2_input.idx = self.episode_step
                 self.s2_input.rgb = rgb
@@ -276,7 +281,7 @@ class InternVLAN1Agent(Agent):
         output = {}
         # Simple branch:
         # 1. If S2 output is full discrete actions, don't execute S1 and return directly
-        print('===============', self.s2_output.output_action, '=================')
+        # print('===============', self.s2_output.output_action, '=================')
         if self.s2_output.output_action is not None:
             output['action'] = [self.s2_output.output_action[0]]
 
@@ -303,7 +308,7 @@ class InternVLAN1Agent(Agent):
             # 2. If output is in latent form, execute latent S1
             if self.s2_output.output_latent is not None:
                 self.output_pixel = copy.deepcopy(self.s2_output.output_pixel)
-                print(self.output_pixel)
+                logger.debug(f"[Sys2] Output pixel: {self.output_pixel}")
 
                 if mode != 'sync':
                     processed_pixel_rgb = (
@@ -364,13 +369,10 @@ class InternVLAN1Agent(Agent):
                     self.dual_forward_step += 1
 
                     if self.dual_forward_step > self.sys2_max_forward_step:
-                        print("!!!!!!!!!!!!")
-                        print("ERR: self.dual_forward_step ", self.dual_forward_step, " > ", self.sys2_max_forward_step)
-                        print("Potential reason: sys1 infers empty trajectory list []")
-                        print("!!!!!!!!!!!!")
-
-        print('Output discretized traj:', output['action'], self.dual_forward_step)
-
+                        logger.warning(
+                            f"[Sys1] ERR: self.dual_forward_step {self.dual_forward_step} > {self.sys2_max_forward_step}. "
+                            "Potential reason: sys1 infers empty trajectory list []."
+                        )
         # Visualization
         if self.vis_debug:
             vis = rgb.copy()

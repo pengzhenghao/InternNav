@@ -179,7 +179,7 @@ class Seq2Seq(BaseModel, extra='allow'):
 
 
 class ModelCfg(BaseModel, extra='allow'):
-    policy_name: Optional[str]
+    policy_name: Optional[str] = None
     ablate_instruction: Optional[bool] = None
     ablate_depth: Optional[bool] = None
     ablate_rgb: Optional[bool] = None
@@ -190,7 +190,7 @@ class ModelCfg(BaseModel, extra='allow'):
     text_encoder: Optional[TextEncoder] = None
     image_encoder: Optional[ImageEncoder] = None
     cross_modal_encoder: Optional[CrossModalEncoder] = None
-    state_encoder: Optional[StateEncoder]
+    state_encoder: Optional[StateEncoder] = None
     progress_monitor: Optional[ProgressMonitor] = None
     diffusion_policy: Optional[DiffusionPolicy] = None
     distance_predictor: Optional[DistancePredictor] = None
@@ -202,3 +202,6 @@ class ModelCfg(BaseModel, extra='allow'):
     rgb_encoder: Optional[RgbEncoder] = None
     depth_encoder: Optional[DepthEncoder] = None
     seq2seq: Optional[Seq2Seq] = None
+    
+    # Extra fields usually handled by extra='allow' but explicitly defined for better typing
+    device: Optional[str] = "cuda"
