@@ -4,6 +4,7 @@ import requests
 import json
 import time
 import base64
+import copy
 from typing import List, Dict, Optional, Any
 from io import BytesIO
 from PIL import Image
@@ -29,6 +30,24 @@ logger = logging.getLogger("System3Agent")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+def redact_image_urls(obj):
+    """
+    Recursively traverse a list or dict. 
+    If a dict key is "image_url", set its value to '<image>'.
+    Modifies the object in place.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "image_url":
+                obj[k] = '<image>'
+            else:
+                redact_image_urls(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            redact_image_urls(item)
+    # recursively traverse the object
+    return obj
 
 class VLMNavigator:
     """
@@ -204,7 +223,7 @@ You must output a JSON object:
         if instruction or thought:
             self.history.append(
                 {
-                    "role": "assistant",
+                    "role": "user",
                     "content": [
                         {
                             "type": "text", 
@@ -245,6 +264,7 @@ You must output a JSON object:
         """
         try:
             os.makedirs(self.dump_dir, exist_ok=True)   
+            no_image_messages = redact_image_urls(copy.deepcopy(messages))
             payload = {
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                 "step": step_idx    ,
@@ -253,7 +273,7 @@ You must output a JSON object:
                 "sys1_steps": sys1_steps,
                 "sys2_calls": sys2_calls,
                 "sys3_calls": sys3_calls,
-                "messages": messages,
+                "messages": no_image_messages,
             }
             episode_str = (
                 f"{self.dump_episode_id:04d}"
