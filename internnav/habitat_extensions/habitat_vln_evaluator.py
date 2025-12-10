@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import textwrap
 
 sys.path.append('./src/diffusion-policy')
 import copy
@@ -325,6 +326,12 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
             # ---------- 2. Episode step loop -----------
             while (not done) and (step_id <= self.max_steps_per_episode):
+
+                print("debug: step_id", step_id)
+                print("debug: done", done)
+                print("debug: max_steps_per_episode", self.max_steps_per_episode)
+
+
                 # Standard Agent Interface Branch
                 if hasattr(self, 'agent') and self.agent is not None:
                     current_obs_input = {
@@ -343,6 +350,104 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         info = self.env.get_metrics()
                         # Just save the raw observation frame for now
                         frame = observations_to_image({'rgb': observations['rgb']}, info)
+                        
+                        # Add instruction text overlay
+                        try:
+                            pil_img = Image.fromarray(frame)
+                            draw = ImageDraw.Draw(pil_img)
+
+                            # Font setup (cache on self to avoid re-loading each frame)
+                            font_size = 20
+                            if not hasattr(self, "_overlay_font"):
+                                try:
+                                    self._overlay_font = ImageFont.truetype(
+                                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size
+                                    )
+                                except Exception:
+                                    self._overlay_font = ImageFont.load_default()
+                            font = self._overlay_font
+
+                            text_color = (255, 255, 255)
+                            stroke_fill = (0, 0, 0)
+
+                            # Prepare GLOBAL instruction: prefix only on first line, indent wrapped lines
+                            global_instr = f"{episode_instruction}"
+                            wrapped_global = textwrap.fill(global_instr, width=90)
+                            wrapped_global_lines = wrapped_global.split('\n')
+                            if wrapped_global_lines:
+                                labeled_global_lines = [f"GLOBAL: {wrapped_global_lines[0]}"]
+                                labeled_global_lines += [f"  {line}" for line in wrapped_global_lines[1:]]
+                                wrapped_global_labeled = '\n'.join(labeled_global_lines)
+                            else:
+                                wrapped_global_labeled = "GLOBAL:"
+
+                            # LOCAL instruction preparation: same style
+                            local_instr_labeled = ""
+                            if hasattr(self.agent, "current_instruction") and self.agent.current_instruction:
+                                local_instr_text = f"{self.agent.current_instruction}"
+                                wrapped_local = textwrap.fill(local_instr_text, width=90)
+                                wrapped_local_lines = wrapped_local.split('\n')
+                                if wrapped_local_lines:
+                                    labeled_local_lines = [f"LOCAL:  {wrapped_local_lines[0]}"]
+                                    labeled_local_lines += [f"  {line}" for line in wrapped_local_lines[1:]]
+                                    local_instr_labeled = '\n'.join(labeled_local_lines)
+
+                            # Compose overlay text
+                            if local_instr_labeled:
+                                combined_text = f"{wrapped_global_labeled}\n{local_instr_labeled}"
+                            else:
+                                combined_text = wrapped_global_labeled
+
+                            # Optionally draw S2 pixel info (from InternVLAN1Agent) and append state/metrics lines
+
+                            # S2 pixel information (if available on the agent): draw directly on the RGB frame
+                            if hasattr(self.agent, "last_s2_pixel") and getattr(self.agent, "last_s2_pixel") is not None:
+                                pixel = self.agent.last_s2_pixel
+                                # pixel is [row, col] => (y, x)
+                                y, x = int(pixel[0]), int(pixel[1])
+                                width, height = pil_img.size
+                                # Clamp to image bounds
+                                x = max(0, min(width - 1, x))
+                                y = max(0, min(height - 1, y))
+                                r = 5
+                                # Draw a small red dot at the pixel coordinate
+                                draw.ellipse((x - r, y - r, x + r, y + r), fill=(255, 0, 0), outline=(0, 0, 0), width=2)
+
+                            # Ask the agent (if it supports it) for a one-line state summary
+                            agent_state_line = ""
+                            if hasattr(self.agent, "get_overlay_state_line"):
+                                try:
+                                    agent_state_line = self.agent.get_overlay_state_line(info)
+                                except Exception as e:
+                                    logger.warning(f"Agent overlay state failed: {e}")
+
+                            # Termination/metrics info from Habitat (success, distance to goal, etc.)
+                            env_status_line = ""
+                            status_parts = []
+                            if "success" in info:
+                                try:
+                                    status_parts.append(f"success={float(info['success']):.2f}")
+                                except Exception:
+                                    status_parts.append(f"success={info['success']}")
+                            if "distance_to_goal" in info:
+                                try:
+                                    status_parts.append(f"ne={float(info['distance_to_goal']):.2f}")
+                                except Exception:
+                                    status_parts.append(f"ne={info['distance_to_goal']}")
+                            if status_parts:
+                                env_status_line = "ENV: " + " ".join(status_parts)
+
+                            extra_lines = [line for line in (agent_state_line, env_status_line) if line]
+                            if extra_lines:
+                                combined_text = f"{combined_text}\n\n" + "\n".join(extra_lines)
+
+                            # Draw text
+                            draw.text((10, 10), combined_text, font=font, fill=text_color, stroke_width=2, stroke_fill=stroke_fill)
+
+                            frame = np.array(pil_img)
+                        except Exception as e:
+                            logger.warning(f"Failed to draw text overlay: {e}")
+
                         vis_frames.append(frame)
 
                     if action == 5:
@@ -467,7 +572,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                     inputs = self.processor(text=[text], images=input_images, return_tensors="pt").to(self.model.device)
 
                     with torch.no_grad():
-                        output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False)
+                        output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False, top_k=None, top_p=None, temperature=None)
 
                     llm_outputs = self.processor.tokenizer.decode(
                         output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True

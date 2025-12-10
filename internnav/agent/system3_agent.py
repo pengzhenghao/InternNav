@@ -24,7 +24,7 @@ logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     datefmt="%H:%M:%S"
 )
-logger = logging.getLogger("System3Agent")
+logger = logging.getLogger(__name__)
 
 # Silence noisy libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)

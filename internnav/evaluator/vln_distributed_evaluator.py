@@ -50,6 +50,10 @@ class VLNDistributedEvaluator(DistributedEvaluator):
         config.agent.model_settings.update({'env_num': self.env_num, 'proc_num': self.proc_num})
         self.robot_name = config.task.robot_name
 
+        # add timestamp to output path
+        self.output_path = f"{self.output_path}_{time.strftime('%Y%m%d_%H%M%S')}"
+        config.eval_settings['output_path'] = self.output_path
+
         super().__init__(config)
         set_seed_model(0)
 

@@ -232,6 +232,9 @@ class InternVLAN1AsyncAgent:
                 past_key_values=self.past_key_values,
                 return_dict_in_generate=True,
                 raw_input_ids=copy.deepcopy(inputs.input_ids),
+                top_k=None,
+                top_p=None,
+                temperature=None,
             )
         output_ids = outputs.sequences
 
