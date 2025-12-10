@@ -88,16 +88,20 @@ You must output a JSON object:
 
     def build_user_message(self, img_b64: str, query: str = "What should I do next?") -> Dict:
         """Prepare the multimodal user message for the VLM."""
+        
+        # TODO: can add system 2 annotated images back here.
+        
         return {
             "role": "user",
             "content": [
-                {"type": "text", "text": query},
+                {"type": "text", "text": "Here is the current image."},
                 {
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:image/jpeg;base64,{img_b64}"
                     },
                 },
+                {"type": "text", "text": query},
             ],
         }
 
@@ -121,12 +125,18 @@ You must output a JSON object:
 
         return {
             "thought": plan.get("thought", ""),
+            "note": plan.get("note", ""),
             "status": plan.get("status", "NAVIGATING"),
             "instruction": plan.get("instruction", ""),
-            "note": plan.get("note", ""),
         }
 
-    def plan_next_step(self, img_b64: str) -> Optional[Dict[str, str]]:
+    def plan_next_step(
+        self,
+        img_b64: str,
+        sys1_steps: Optional[int] = None,
+        sys2_calls: Optional[int] = None,
+        sys3_calls: Optional[int] = None,
+    ) -> Optional[Dict[str, str]]:
         """
         Main VLM entrypoint:
         - builds messages
@@ -142,9 +152,6 @@ You must output a JSON object:
 
         user_msg = self.build_user_message(img_b64, query=query)
         messages = self.history + [user_msg]
-
-        # Persist the full messages for debugging / inspection
-        self._dump_messages(messages, query)
 
         try:
             completion = self.client.chat.completions.create(
@@ -168,7 +175,21 @@ You must output a JSON object:
         status = plan["status"]
         instruction = plan["instruction"]
         note = plan["note"]
+
+        # TODO: step should include sys2 and sys1 and sys3 steps.
         step_idx = self.history.__len__() // 2  # each assistant add bumps this
+
+        # Persist the full messages for debugging / inspection
+        self._dump_messages(
+            messages,
+            response_text,
+            plan,
+            step_idx,
+            sys1_steps=sys1_steps,
+            sys2_calls=sys2_calls,
+            sys3_calls=sys3_calls,
+        )
+
 
         logger.info(
             f"\n[Sys3] Step {step_idx}\n"
@@ -184,10 +205,21 @@ You must output a JSON object:
             self.history.append(
                 {
                     "role": "assistant",
-                    "content": (
-                        f"[Step {step_idx} | {time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                        f"Status: {status}. Instruction: {instruction}. Note: {note}. Thought: {thought}"
-                    ),
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": (
+                                f"[Step {step_idx} | {time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                                f"Status: {status}. Instruction: {instruction}. Note: {note}. Thought: {thought}. Image: "
+                            )
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{img_b64}"
+                            },
+                        },
+                    ],
                 }
             )
             # Update history trackers
@@ -196,19 +228,31 @@ You must output a JSON object:
 
         return plan
 
-    def _dump_messages(self, messages: List[Dict], query: str) -> None:
+    def _dump_messages(
+        self,
+        messages: List[Dict],
+        response_text: str,
+        plan: Dict,
+        step_idx: int,
+        sys1_steps: Optional[int] = None,
+        sys2_calls: Optional[int] = None,
+        sys3_calls: Optional[int] = None,
+    ) -> None:
         """
         Dump the full messages to disk.
         - latest.json : always overwritten with the latest request
         - <episode>_step_XXXX.json : saved every dump_freq steps (default every step)
         """
         try:
-            os.makedirs(self.dump_dir, exist_ok=True)
-            step_id = len([m for m in self.history if m.get("role") == "assistant"])
+            os.makedirs(self.dump_dir, exist_ok=True)   
             payload = {
                 "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                "step": step_id,
-                "query": query,
+                "step": step_idx    ,
+                "response_text": response_text,
+                "plan": plan,
+                "sys1_steps": sys1_steps,
+                "sys2_calls": sys2_calls,
+                "sys3_calls": sys3_calls,
                 "messages": messages,
             }
             episode_str = (
@@ -217,7 +261,7 @@ You must output a JSON object:
                 else "0000"
             )
             step_path = os.path.join(self.dump_dir, f"{episode_str}.json")
-            print("in _dump_messages, step_path:", step_path)
+            # print("in _dump_messages, step_path:", step_path)
             with open(step_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -237,6 +281,8 @@ class System3Agent(InternVLAN1Agent):
         self.prompt_dump_dir: Optional[str] = None
         self.prompt_dump_freq: int = 1
         self.prompt_dump_episode_id: Optional[int] = None
+        self.sys3_call_count: int = 0
+        self.sys2_call_count: int = 0
         # Throttle System3 invocations to avoid over-calling VLM.
         # Defaults: allow a new Sys3 call every 2 macro steps.
         self.sys3_interval_steps: int = config.model_settings.get("sys3_interval_steps", 2)
@@ -289,6 +335,7 @@ class System3Agent(InternVLAN1Agent):
         )
 
     def step(self, obs: List[Dict[str, Any]]):
+        logger.info(f"[Sys3] Episode step {self.episode_step}. Sys2 calls: {self.sys2_call_count}. Sys3 calls: {self.sys3_call_count}.")
         # Handle single observation (batch size 1)
         current_obs = obs[0]
         rgb = current_obs['rgb'] # numpy array (H, W, 3)
@@ -296,30 +343,42 @@ class System3Agent(InternVLAN1Agent):
         # 1. System 3 Logic: Only call if System 2 needs to run
         # We check self.should_infer_s2(self.mode) OR if we are looking down (which forces inference)
         # Note: 'look_down' logic is handled in super().step, but we need to know if we should update instruction now.
-        if self.navigator:
-            should_call_sys3 = self.should_infer_s2(self.mode) or self.look_down
-            interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
-            if should_call_sys3 and interval_ok:
-                # Convert numpy array to PIL Image
-                image = Image.fromarray(rgb.astype('uint8'), 'RGB')
-                img_b64 = pil_to_base64(image)
-                
-                # Plan next step
-                plan = self.navigator.plan_next_step(img_b64)
-                self.last_sys3_step = self.episode_step
-                
-                if plan:
-                    if plan.get("status") == "DONE":
-                         logger.info("[Sys3] Goal reached signal.")
-                         return [{'action': [0], 'ideal_flag': True}]
-                         
-                    if plan.get("instruction"):
-                        self.current_instruction = plan.get("instruction")
-                        logger.info(f"[Sys3] New instruction: {self.current_instruction}")
+        assert self.navigator
+
+        should_call_sys2 = self.should_infer_s2(self.mode) or self.look_down
+        interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
+
+        should_call_sys3 = should_call_sys2 and interval_ok
+        if should_call_sys3:
+            # Convert numpy array to PIL Image
+            image = Image.fromarray(rgb.astype('uint8'), 'RGB')
+            img_b64 = pil_to_base64(image)
+            
+            # Plan next step
+            self.sys3_call_count += 1
+            plan = self.navigator.plan_next_step(
+                img_b64,
+                sys1_steps=self.episode_step,
+                sys2_calls=self.sys2_call_count,
+                sys3_calls=self.sys3_call_count,
+            )
+            self.last_sys3_step = self.episode_step
+            
+            if plan:
+                if plan.get("status") == "DONE":
+                        logger.info("[Sys3] Goal reached signal.")
+                        return [{'action': [0], 'ideal_flag': True}]
+                        
+                if plan.get("instruction"):
+                    self.current_instruction = plan.get("instruction")
+                    logger.info(f"[Sys3] New instruction: {self.current_instruction}")
         
         # 2. Update instruction for System 2
         if self.current_instruction:
             current_obs['instruction'] = self.current_instruction
+
+        if should_call_sys2:
+            self.sys2_call_count += 1  # track how many times Sys2 inference is requested
         
         # 3. System 2 Logic: Call parent step
         return super().step(obs)

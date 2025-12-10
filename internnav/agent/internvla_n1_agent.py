@@ -19,7 +19,7 @@ from internnav.model.utils.misc import set_random_seed
 from internnav.model.utils.vln_utils import S1Input, S1Output, S2Input, S2Output
 
 
-logger = logging.getLogger("InternVLAN1Agent")
+logger = logging.getLogger("InternNavAgent")
 logger.setLevel(logging.INFO)
 
 
@@ -282,6 +282,7 @@ class InternVLAN1Agent(Agent):
         # Simple branch:
         # 1. If S2 output is full discrete actions, don't execute S1 and return directly
         # print('===============', self.s2_output.output_action, '=================')
+        logger.info(f"[Sys2] Output action: {self.s2_output.output_action}")
         if self.s2_output.output_action is not None:
             output['action'] = [self.s2_output.output_action[0]]
 
