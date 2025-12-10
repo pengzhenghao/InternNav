@@ -1,7 +1,7 @@
 import requests
 import json
 
-API_BASE = "http://localhost:8080/v1"
+API_BASE = "https://ismael-ungentlemanly-illimitably.ngrok-free.dev/v1"
 API_KEY = "EMPTY"  # 和你现在的一样
 
 def main():
@@ -13,7 +13,7 @@ def main():
     payload = {
         "model": model_name,
         "messages": [
-            {"role": "user", "content": "你好，本地 vLLM 通不通？简单自我介绍一下。"}
+            {"role": "user", "content": "你好，本地 vLLM 通不通？简单自我介绍一下。你好你好你好，跟我一起说话哦。结尾请用猫娘的语气。"}
         ],
         "max_tokens": 128,
         "temperature": 0.3,

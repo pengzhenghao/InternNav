@@ -85,37 +85,47 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         cfg.env.env_settings['output_path'] = self.output_path
 
         # init agent and env
-        super().__init__(cfg, init_agent=False)
+        self.model_args = argparse.Namespace(**cfg.agent.model_settings)
+        # For legacy modes 'dual_system' and 'system2', we manually load the model later.
+        # For other modes (like 'system3'), we let the parent initialize the agent.
+        init_agent = self.model_args.mode not in ['dual_system', 'system2']
+        super().__init__(cfg, init_agent=init_agent)
 
         # ------------------------------------- model ------------------------------------------
-        self.model_args = argparse.Namespace(**cfg.agent.model_settings)
+        
+        # Only manually load model if we didn't init an agent (legacy modes)
+        if not init_agent:
+            processor = AutoProcessor.from_pretrained(self.model_args.model_path)
+            processor.tokenizer.padding_side = 'left'
 
-        processor = AutoProcessor.from_pretrained(self.model_args.model_path)
-        processor.tokenizer.padding_side = 'left'
+            device = torch.device(f"cuda:{self.local_rank}")
+            if self.model_args.mode == 'dual_system':
+                model = InternVLAN1ForCausalLM.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
+            elif self.model_args.mode == 'system2':
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    self.model_args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map={"": device},
+                )
+            else:
+                raise ValueError(f"Invalid mode: {self.model_args.mode}")
 
-        device = torch.device(f"cuda:{self.local_rank}")
-        if self.model_args.mode == 'dual_system':
-            model = InternVLAN1ForCausalLM.from_pretrained(
-                self.model_args.model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map={"": device},
-            )
-        elif self.model_args.mode == 'system2':
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.model_args.model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                device_map={"": device},
-            )
+            model.eval()
+            self.device = device
+
+            self.model = model
+            self.processor = processor
         else:
-            raise ValueError(f"Invalid mode: {self.model_args.mode}")
-
-        model.eval()
-        self.device = device
-
-        self.model = model
-        self.processor = processor
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            # Ensure agent is on the correct device
+            if hasattr(self.agent, 'to'):
+                self.agent.to(self.device)
 
         # refactor: this part used in three places
         prompt = "You are an autonomous navigation assistant. Your task is to <instruction>. Where should you go next to stay on track? Please output the next waypoint\'s coordinates in the image. Please output STOP when you have successfully completed the task."
@@ -218,7 +228,8 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         # self.env = self.env  # HabitatEnv from DistributedEvaluator
 
         sucs, spls, oss, nes = [], [], [], []
-        self.model.eval()
+        if hasattr(self, 'model') and self.model is not None:
+            self.model.eval()
 
         # resume from previous results
         if os.path.exists(os.path.join(self.output_path, 'progress.json')):
@@ -259,6 +270,11 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             )
             print("episode start", episode_instruction)
 
+            if hasattr(self, 'agent') and self.agent is not None:
+                self.agent.reset(reset_index=0)
+                if hasattr(self.agent, 'set_goal'):
+                    self.agent.set_goal(episode_instruction)
+            
             agent_state = self.env._env.sim.get_agent_state()
             rotation = agent_state.rotation
             translation = agent_state.position
@@ -295,6 +311,35 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
             # ---------- 2. Episode step loop -----------
             while (not done) and (step_id <= self.max_steps_per_episode):
+                # Standard Agent Interface Branch
+                if hasattr(self, 'agent') and self.agent is not None:
+                    current_obs_input = {
+                        'rgb': observations['rgb'],
+                        'depth': observations['depth'],
+                        'instruction': episode_instruction,
+                        'gps': observations.get('gps'),
+                        'compass': observations.get('compass')
+                    }
+                    # Agent expects list, returns list
+                    agent_outputs = self.agent.step([current_obs_input])
+                    agent_output = agent_outputs[0]
+                    action = agent_output['action'][0]
+                    
+                    if self.save_video:
+                        info = self.env.get_metrics()
+                        # Just save the raw observation frame for now
+                        frame = observations_to_image({'rgb': observations['rgb']}, info)
+                        vis_frames.append(frame)
+
+                    if action == 5:
+                        self.env.step(action)
+                        observations, _, done, _ = self.env.step(action)
+                    else:
+                        observations, _, done, _ = self.env.step(action)
+                    
+                    step_id += 1
+                    continue
+
                 # refactor agent get action
                 rgb = observations["rgb"]
                 depth = observations["depth"]
@@ -545,7 +590,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             action = local_actions.pop(0)
 
                     forward_action += 1
-                    print('forward_action', forward_action, flush=True)
+                    # print('forward_action', forward_action, flush=True)
                     if forward_action > 8:
                         goal = None
                         output_ids = None
@@ -574,7 +619,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         frame = observations_to_image({'rgb': np.asarray(save_raw_image)}, info)
                         vis_frames.append(frame)
 
-                print("step_id", step_id, "action", action)
+                # print("step_id", step_id, "action", action)
 
                 # refactor: core
                 if action == 5:
@@ -743,7 +788,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         '''
         v, u = pixel
         z = depth[v, u]
-        print("depthhhhhhhhhhhhhh", z)
+        # print("depthhhhhhhhhhhhhh", z)
 
         x = (u - intrinsic[0, 2]) * z / intrinsic[0, 0]
         y = (v - intrinsic[1, 2]) * z / intrinsic[1, 1]

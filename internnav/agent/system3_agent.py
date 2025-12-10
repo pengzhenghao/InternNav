@@ -20,9 +20,15 @@ DEFAULT_MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-VL-30B-A3B-Instruc
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | AGENT | %(levelname)-8s | %(message)s",
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
 )
 logger = logging.getLogger("System3Agent")
+
+# Silence noisy libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 class VLMNavigator:
     """
@@ -131,7 +137,7 @@ You must output a JSON object:
             completion = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                max_tokens=300,
+                max_tokens=1024,
                 temperature=0.1,
             )
         except Exception as e:
@@ -139,7 +145,7 @@ You must output a JSON object:
             return None
 
         response_text = completion.choices[0].message.content
-        logger.info("[VLM] Raw Model Response received")
+        logger.debug(f"[Sys3] Raw VLM Response: {response_text}")
 
         plan = self._parse_response(response_text)
         if not plan:
@@ -150,8 +156,8 @@ You must output a JSON object:
         instruction = plan["instruction"]
 
         logger.info(
-            f"[VLM] Parsed plan -> status={status}, instruction='{instruction}', "
-            f"thought_preview='{thought[:120]}{'...' if len(thought) > 120 else ''}'"
+            f"[Sys3] Step {self.history.__len__()//2} | status={status} | instruction='{instruction}' | "
+            f"thought='{thought[:80]}...'"
         )
 
         # Maintain a compact text-only summary to keep context small
@@ -177,10 +183,17 @@ class System3Agent(InternVLAN1Agent):
         self.navigator: Optional[VLMNavigator] = None
         self.current_instruction = None
         
-        # Load System 3 config from env
-        self.vlm_api_key = os.environ.get("VLLM_API_KEY", DEFAULT_VLLM_API_KEY)
-        self.vlm_base_url = os.environ.get("VLLM_API_URL", DEFAULT_VLLM_API_URL)
-        self.vlm_model_name = os.environ.get("MODEL_NAME", DEFAULT_MODEL_NAME)
+        # Load System 3 config from config, fallback to env
+        model_settings = config.model_settings
+        
+        # Priority: Env Vars (Launch Config) > Config File > Default
+        self.vlm_api_key = os.environ.get("VLLM_API_KEY") or model_settings.get("vlm_api_key") or DEFAULT_VLLM_API_KEY
+        self.vlm_base_url = os.environ.get("VLLM_API_URL") or model_settings.get("vlm_api_url") or DEFAULT_VLLM_API_URL
+        self.vlm_model_name = os.environ.get("MODEL_NAME") or model_settings.get("vlm_model_name") or DEFAULT_MODEL_NAME
+        logger.info(f"System 3 Agent initialized with: "
+                    f"vlm_api_key={self.vlm_api_key}, "
+                    f"vlm_base_url={self.vlm_base_url}, "
+                    f"vlm_model_name={self.vlm_model_name}")
         
     def reset(self, reset_index=None):
         super().reset(reset_index)
@@ -202,24 +215,28 @@ class System3Agent(InternVLAN1Agent):
         current_obs = obs[0]
         rgb = current_obs['rgb'] # numpy array (H, W, 3)
         
-        # 1. System 3 Logic: Get instruction from VLM
+        # 1. System 3 Logic: Only call if System 2 needs to run
+        # We check self.should_infer_s2(self.mode) OR if we are looking down (which forces inference)
+        # Note: 'look_down' logic is handled in super().step, but we need to know if we should update instruction now.
         if self.navigator:
-            # Convert numpy array to PIL Image
-            image = Image.fromarray(rgb.astype('uint8'), 'RGB')
-            img_b64 = pil_to_base64(image)
-            
-            # Plan next step
-            plan = self.navigator.plan_next_step(img_b64)
-            
-            if plan:
-                if plan.get("status") == "DONE":
-                     logger.info("System 3 decided goal is reached.")
-                     # We can signal stop by returning a stop action immediately?
-                     # InternVLAN1Agent action 0 is STOP.
-                     return [{'action': [0], 'ideal_flag': True}]
-                     
-                if plan.get("instruction"):
-                    self.current_instruction = plan.get("instruction")
+            if self.should_infer_s2(self.mode) or self.look_down:
+                # logger.info(f"[Sys3] Inference needed (step {self.episode_step}). Calling VLM...")
+                
+                # Convert numpy array to PIL Image
+                image = Image.fromarray(rgb.astype('uint8'), 'RGB')
+                img_b64 = pil_to_base64(image)
+                
+                # Plan next step
+                plan = self.navigator.plan_next_step(img_b64)
+                
+                if plan:
+                    if plan.get("status") == "DONE":
+                         logger.info("[Sys3] Goal reached signal.")
+                         return [{'action': [0], 'ideal_flag': True}]
+                         
+                    if plan.get("instruction"):
+                        self.current_instruction = plan.get("instruction")
+                        logger.info(f"[Sys3] New instruction: {self.current_instruction}")
         
         # 2. Update instruction for System 2
         if self.current_instruction:

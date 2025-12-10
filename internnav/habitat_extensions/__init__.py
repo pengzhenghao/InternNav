@@ -1,3 +1,2 @@
 from internnav.habitat_extensions.habitat_env import HabitatEnv
 from internnav.habitat_extensions.habitat_vln_evaluator import HabitatVLNEvaluator
-from internnav.habitat_extensions.system3_evaluator import HabitatSystem3Evaluator

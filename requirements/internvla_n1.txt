@@ -4,3 +4,4 @@ diffusers==0.33.1
 diffusion_policy @ git+https://github.com/real-stanford/diffusion_policy.git@5ba07ac6661db573af695b419a7947ecb704690f
 ftfy==6.3.1
 transformers==4.51.0
+openai==2.9.0

@@ -20,8 +20,15 @@ conda activate <env>
 ```
 
 2. **Install habitat-sim:**
+
 ```bash
+# set faster solver.
+conda install -n base conda-libmamba-solver
+conda config --set solver libmamba
+
+
 conda install habitat-sim==0.2.4 withbullet headless -c conda-forge -c aihabitat
+
 ```
 
 3. **Initialize and install habitat-lab submodule:**
