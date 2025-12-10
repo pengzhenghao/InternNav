@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 sys.path.append('./src/diffusion-policy')
 import copy
@@ -52,7 +53,10 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         self.save_video = args.save_video
         self.epoch = args.epoch
         self.max_steps_per_episode = args.max_steps_per_episode
-        self.output_path = args.output_path
+        # Append a timestamped run id to log directory to avoid collisions
+        run_ts = time.strftime("%Y%m%d_%H%M%S")
+        self.run_ts = run_ts
+        self.output_path = os.path.join(args.output_path, run_ts)
 
         # create habitat config
         self.config_path = cfg.env.env_settings['config_path']
@@ -274,6 +278,12 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 self.agent.reset(reset_index=0)
                 if hasattr(self.agent, 'set_goal'):
                     self.agent.set_goal(episode_instruction)
+            # Propagate prompt dump path/frequency to agent (for System3)
+            if hasattr(self.agent, "set_prompt_dump"):
+                prompt_dump_dir = os.path.join(self.output_path, f'prompt_{self.epoch}', f'{scene_id}')
+                os.makedirs(prompt_dump_dir, exist_ok=True)
+                # dump every step by default; agent can throttle internally
+                self.agent.set_prompt_dump(prompt_dump_dir, freq=1, episode_id=episode_id)
             
             agent_state = self.env._env.sim.get_agent_state()
             rotation = agent_state.rotation
