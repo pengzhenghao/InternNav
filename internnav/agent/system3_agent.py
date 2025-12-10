@@ -102,19 +102,22 @@ Strategic Guidelines:
 2. Verify Targets: Ensure the target you are heading towards is actually the correct one. If the goal is "door" but you are facing a staircase, check your surroundings first.
 3. Reflect on Progress: In your "thought", explicitly evaluate if your previous actions brought you closer to the high-level goal. If not, adjust your strategy (e.g., from moving to searching).
 4. Subgoals: Break the user goal into immediate, concrete subgoals. Use these as the instruction for System 2.
+5. Verification Stage: When you believe you have reached the goal, DO NOT immediately output DONE. Instead, switch to "VERIFICATION" status and look around to confirm the goal is truly achieved. Only output DONE after this verification.
 
 Your Loop:
 1. Analyze the current image.
 2. Determine if the goal is reached (success once within 3 meters).
 3. Reflect on current progress and validity of the previous plan.
-4. If not reached, plan the immediate next step (Search or Move) by selecting a specific subgoal.
-5. Output a navigation instruction for the local system.
+4. If you think you have arrived, trigger "VERIFICATION" status and issue instructions to look around (e.g., "Turn 360 degrees to verify context") to make sure the goal is really achieved.
+5. If in "VERIFICATION" status and you confirm the goal is achieved, output "DONE".
+6. If not reached, plan the immediate next step (Search or Move) by selecting a specific subgoal.
+7. Output a navigation instruction for the local system.
 
 Output Format:
 You must output a JSON object:
 {{
   "thought": "Reflect on progress, visibility of target, and why this new step is chosen...",
-  "status": "NAVIGATING" | "SEARCHING" | "DONE",
+  "status": "NAVIGATING" | "SEARCHING" | "VERIFICATION" | "DONE",
   "instruction": "Informative text describing the next step (e.g. 'Turn left to scan for the door.')",
   "note": "One-line summary of the current scenario/progress to remind yourself in the next step"
 }}
@@ -221,7 +224,7 @@ You must output a JSON object:
                 "type": "text",
                 "text": (
                     "Respond ONLY with a JSON object of the form: "
-                    '{"thought": "...", "status": "NAVIGATING" | "SEARCHING" | "DONE", '
+                    '{"thought": "...", "status": "NAVIGATING" | "SEARCHING" | "VERIFICATION" | "DONE", '
                     '"instruction": "...", "note": "...", "change_instruction": true | false}. '
                     'Set "change_instruction" to false if the current instruction should be KEPT.'
                 ),
