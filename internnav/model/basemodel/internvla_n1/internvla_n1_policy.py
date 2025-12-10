@@ -173,6 +173,9 @@ class InternVLAN1Net(PreTrainedModel):
                 use_cache=True,
                 past_key_values=None,
                 return_dict_in_generate=True,
+                top_k=None,
+                top_p=None,
+                temperature=None,
             ).sequences
         self.llm_output = self.processor.tokenizer.decode(
             output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True

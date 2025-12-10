@@ -19,7 +19,7 @@ from internnav.model.utils.misc import set_random_seed
 from internnav.model.utils.vln_utils import S1Input, S1Output, S2Input, S2Output
 
 
-logger = logging.getLogger("InternNavAgent")
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
@@ -47,6 +47,14 @@ class InternVLAN1Agent(Agent):
         self.policy = policy(config=policy_config(model_cfg=model_config))
         self.policy.eval()
 
+        # Discrete action mapping (e.g., STOP, arrows) for visualization/logging
+        self.actions2idx = getattr(self.policy, "actions2idx", None)
+        self._action_map = {}
+        if self.actions2idx is not None:
+            for k, v in self.actions2idx.items():
+                idx = v[0] if isinstance(v, list) and len(v) > 0 else v
+                self._action_map[idx] = k
+
         self.camera_intrinsic = self.get_intrinsic_matrix(
             self._model_settings.width, self._model_settings.height, self._model_settings.hfov
         )
@@ -68,6 +76,11 @@ class InternVLAN1Agent(Agent):
         self.s2_input = S2Input()
         self.s2_output = S2Output()
         self.s1_output = S1Output()
+
+        # Cached visualization info from S2 for external consumers (e.g., evaluators)
+        self.last_s2_pixel = None
+        self.last_s2_idx = None
+        self.last_discrete_action = None
 
         # Thread management
         self.s2_thread = None
@@ -113,6 +126,11 @@ class InternVLAN1Agent(Agent):
         self.dual_forward_step = 0
         self.sys1_infer_times = 0
 
+        # Reset cached S2 visualization info
+        self.last_s2_pixel = None
+        self.last_s2_idx = None
+        self.last_discrete_action = None
+
         # Reset s2 agent
         with self.s2_agent_lock:
             self.policy.reset()
@@ -120,6 +138,37 @@ class InternVLAN1Agent(Agent):
         if self.vis_debug:
             self.fps_writer = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}.mp4", fps=5)
             self.fps_writer2 = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_dp.mp4", fps=5)
+
+    def reset_sys2_state(self):
+        """
+        Reset only the System 2 / System 1 low-level navigation state while
+        keeping the overall episode index and any higher-level controller
+        (e.g., System 3) state intact.
+
+        This is intended to be called by higher-level agents when starting a
+        new local subgoal, or when the previous local plan is deemed wrong.
+        """
+        # Clear S1/S2 bookkeeping for the current local plan
+        self.look_down = False
+        self.dual_forward_step = 0
+        self.sys1_infer_times = 0
+
+        # Fresh S1/S2 IO containers
+        self.s1_input = S1Input()
+        self.s1_output = S1Output()
+        with self.s2_input_lock:
+            self.s2_input = S2Input()
+        with self.s2_output_lock:
+            self.s2_output = S2Output()
+
+        # Clear cached visualization info
+        self.last_s2_pixel = None
+        self.last_s2_idx = None
+        self.last_discrete_action = None
+
+        # Reset policy internal state for the new local subgoal
+        with self.s2_agent_lock:
+            self.policy.reset()
 
     def get_intrinsic_matrix(self, width, height, hfov) -> np.ndarray:
         width = width
@@ -158,7 +207,6 @@ class InternVLAN1Agent(Agent):
                 #         continue
 
                 # Execute inference
-                success = True
                 try:
                     with self.s2_agent_lock:
                         current_s2_output = self.policy.s2_step(
@@ -173,8 +221,8 @@ class InternVLAN1Agent(Agent):
                     logger.error(f"[Sys2] s2 infer error: {e}")
                     self.s2_output.is_infering = False
                     self.policy.reset()
-                    success = False
-                if not success:
+
+                    # Fallback: retry without look_down flag if the first attempt fails
                     try:
                         current_s2_output = self.policy.s2_step(
                             self.s2_input.rgb,
@@ -185,7 +233,7 @@ class InternVLAN1Agent(Agent):
                             False,
                         )
                     except Exception as e:
-                        logger.error(f"[Sys2] s2 infer error: {e}")
+                        logger.error(f"[Sys2] s2 infer error (fallback): {e}")
                         self.s2_output.is_infering = False
                         self.policy.reset()
                         self.s2_output.output_pixel = None
@@ -206,6 +254,22 @@ class InternVLAN1Agent(Agent):
                     self.s2_output.rgb_memory = self.s2_input.rgb
                     self.s2_output.depth_memory = self.s2_input.depth
                     self.s2_output.is_infering = False
+
+                    
+                # Beautiful log for S2 output
+                if current_s2_output.output_latent is not None and hasattr(current_s2_output.output_latent, "shape"):
+                    latent_shape = tuple(current_s2_output.output_latent.shape)
+                    # latent_avg = float(np.mean(current_s2_output.output_latent))
+                    latent_str = f"shape={latent_shape}"
+                else:
+                    latent_str = "None"
+                logger.info(
+                    f"[Sys2] Inference Result Output Pixel: {current_s2_output.output_pixel} "
+                    f"Output Action: {current_s2_output.output_action} "
+                    f"Output Latent: {latent_str}"
+                )
+
+
                 time.sleep(0.01)  # Sleep briefly after completing inference
 
         self.s2_thread = threading.Thread(target=s2_thread_func)
@@ -267,22 +331,29 @@ class InternVLAN1Agent(Agent):
                 self.s2_input.look_down = self.look_down
                 self.s2_output.is_infering = True  # for async
 
+            logger.info(f"[Sys2] Calling S2 inference for instruction: {instruction}")
+
             self.dual_forward_step = 0
         else:
             # Even if this frame doesn't do s2 inference, rgb needs to be provided to ensure history is correct
             self.policy.step_no_infer(rgb, depth, pose)
         # S1 inference is done in the main thread
         while self.s2_output.is_infering:
-            time.sleep(0.5)
+            time.sleep(0.2)
 
         while not self.s2_output.validate():
             time.sleep(0.2)
+
+        # Per-step visualization state defaults
+        self.last_s2_pixel = None
+        self.last_s2_idx = None
+        self.last_discrete_action = None
 
         output = {}
         # Simple branch:
         # 1. If S2 output is full discrete actions, don't execute S1 and return directly
         # print('===============', self.s2_output.output_action, '=================')
-        logger.info(f"[Sys2] Output action: {self.s2_output.output_action}")
+
         if self.s2_output.output_action is not None:
             output['action'] = [self.s2_output.output_action[0]]
 
@@ -309,6 +380,9 @@ class InternVLAN1Agent(Agent):
             # 2. If output is in latent form, execute latent S1
             if self.s2_output.output_latent is not None:
                 self.output_pixel = copy.deepcopy(self.s2_output.output_pixel)
+                # Cache for external visualization (e.g., evaluator video overlay)
+                self.last_s2_pixel = copy.deepcopy(self.s2_output.output_pixel)
+                self.last_s2_idx = self.s2_output.idx
                 logger.debug(f"[Sys2] Output pixel: {self.output_pixel}")
 
                 if mode != 'sync':
@@ -374,6 +448,12 @@ class InternVLAN1Agent(Agent):
                             f"[Sys1] ERR: self.dual_forward_step {self.dual_forward_step} > {self.sys2_max_forward_step}. "
                             "Potential reason: sys1 infers empty trajectory list []."
                         )
+
+        # Cache discrete action for external visualization (e.g., evaluator overlay)
+        if 'action' in output and output['action']:
+            self.last_discrete_action = output['action'][0]
+
+        logger.debug(f"[Sys1] Output discretized traj: {output.get('action', 'N/A')} step: {self.dual_forward_step}")
         # Visualization
         if self.vis_debug:
             vis = rgb.copy()
@@ -408,3 +488,28 @@ class InternVLAN1Agent(Agent):
             return [{'action': output['velocity'], 'ideal_flag': False}]
         else:
             assert False
+
+    def get_overlay_state_line(self, info=None) -> str:
+        """
+        Return a one-line summary of System 2 state for visualization.
+
+        Includes:
+        - Latest discrete action (translated to human-readable label, e.g., STOP, arrows)
+        - Latest pixel goal (if any) and its index
+        """
+        parts = []
+
+        # Discrete action (System 2 / executed action)
+        if self.last_discrete_action is not None:
+            label = self._action_map.get(self.last_discrete_action, f"Act{self.last_discrete_action}")
+            parts.append(f"S2_ACT={label}({self.last_discrete_action})")
+
+        # Pixel goal (System 2 latent mode)
+        if self.last_s2_pixel is not None:
+            y, x = int(self.last_s2_pixel[0]), int(self.last_s2_pixel[1])
+            if self.last_s2_idx is not None:
+                parts.append(f"S2_PIX=({x},{y}) idx={self.last_s2_idx}")
+            else:
+                parts.append(f"S2_PIX=({x},{y})")
+
+        return " | ".join(parts)

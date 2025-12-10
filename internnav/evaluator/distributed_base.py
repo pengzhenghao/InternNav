@@ -39,7 +39,11 @@ class DistributedEvaluator(Evaluator):
 
         self.rank = get_rank()
         self.world_size = get_world_size()
-        self.output_path = eval_cfg.eval_settings.get("output_path")
+        if hasattr(self, 'output_path'):
+            # If output path is already set, don't overwrite it
+            self.output_path = self.output_path
+        else:
+            self.output_path = eval_cfg.eval_settings.get("output_path")
 
         # habitat env also need rank to split dataset
         eval_cfg.env.env_settings['rank'] = get_rank()
