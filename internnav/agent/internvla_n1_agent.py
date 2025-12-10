@@ -18,8 +18,7 @@ from internnav.model import get_config, get_policy
 from internnav.model.utils.misc import set_random_seed
 from internnav.model.utils.vln_utils import S1Input, S1Output, S2Input, S2Output
 
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(os.path.basename(__file__))
 logger.setLevel(logging.INFO)
 
 
@@ -482,9 +481,26 @@ class InternVLAN1Agent(Agent):
                 self.fps_writer2.append_data(self.s1_output.vis_image)
 
         self.episode_step += 1
+
+        # Explicit logging of termination / special signals from System 1 / System 2.
         if 'action' in output:
+            act = output['action'][0] if output['action'] else None
+            if act == 0:
+                logger.info(
+                    "[Sys1/Sys2] Emitting STOP action (0) to environment at episode_step=%d.",
+                    self.episode_step,
+                )
+            elif act == -1:
+                logger.info(
+                    "[Sys1/Sys2] Emitting internal NO-OP / look-down sync action (-1) at episode_step=%d.",
+                    self.episode_step,
+                )
             return [{'action': output['action'], 'ideal_flag': True}]
         elif 'velocity' in output:
+            logger.info(
+                "[Sys1/Sys2] Emitting continuous control velocity to environment at episode_step=%d.",
+                self.episode_step,
+            )
             return [{'action': output['velocity'], 'ideal_flag': False}]
         else:
             assert False

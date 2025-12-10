@@ -24,7 +24,7 @@ logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     datefmt="%H:%M:%S"
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(os.path.basename(__file__))
 
 # Silence noisy libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -123,28 +123,117 @@ You must output a JSON object:
 
     def build_user_message(
         self,
-        img_b64: str,
+        frames_b64: List[str],
         query: str = "What should I do next?",
         sys2_calls: int = 0,
         sys3_calls: int = 0,
+        current_instruction: Optional[str] = None,
+        subepisode_id: Optional[int] = None,
     ) -> Dict:
         """Prepare the multimodal user message for the VLM."""
-        
-        # TODO: can add system 2 annotated images back here.
-        
-        return {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Here is the current image."},
-                {"type": "text", "text": f"System 2 calls so far: {sys2_calls}. System 3 calls so far: {sys3_calls}."},
+        # frames_b64 is a list of base64-encoded JPEG images from the current sub-episode,
+        # ordered from oldest to newest. The last frame is always the latest observation.
+        if not frames_b64:
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "No visual frames are available. Please respond conservatively.",
+                    },
+                    {"type": "text", "text": query},
+                ],
+            }
+
+        num_frames = len(frames_b64)
+        content: List[Dict[str, Any]] = []
+
+        # High-level counters and context
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    f"System 2 calls so far: {sys2_calls}. "
+                    f"System 3 calls so far: {sys3_calls}."
+                ),
+            }
+        )
+
+        # Explicitly state the current instruction (or lack of one)
+        if current_instruction:
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "Current navigation instruction being executed by System 2 "
+                        f"(do NOT change it unless truly necessary) is:\n\"{current_instruction}\""
+                    ),
+                }
+            )
+        else:
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "No navigation instruction has been issued yet. "
+                        "You must propose the FIRST short navigation instruction for System 2."
+                    ),
+                }
+            )
+
+        # Sub-episode context
+        if subepisode_id is not None:
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"You are currently in sub-episode #{subepisode_id}. "
+                        f"This sub-episode contains {num_frames} visual frames, "
+                        "from oldest to newest, describing what happened since the current instruction was issued."
+                    ),
+                }
+            )
+
+        # Attach all frames in temporal order
+        for idx, frame_b64 in enumerate(frames_b64):
+            if idx == num_frames - 1:
+                desc = "latest frame (most recent observation in this sub-episode)"
+            else:
+                desc = f"earlier frame {idx + 1} of {num_frames} in this sub-episode"
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"Visual {idx + 1}: {desc}.",
+                }
+            )
+            content.append(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/jpeg;base64,{img_b64}"
+                        "url": f"data:image/jpeg;base64,{frame_b64}",
                     },
-                },
-                {"type": "text", "text": query},
-            ],
+                }
+            )
+
+        # Remind the model about the desired JSON format including change_instruction.
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    "Respond ONLY with a JSON object of the form: "
+                    '{"thought": "...", "status": "NAVIGATING" | "SEARCHING" | "DONE", '
+                    '"instruction": "...", "note": "...", "change_instruction": true | false}. '
+                    'Set "change_instruction" to false if the current instruction should be KEPT.'
+                ),
+            }
+        )
+
+        # Final query/instruction to the model
+        content.append({"type": "text", "text": query})
+
+        return {
+            "role": "user",
+            "content": content,
         }
 
     def _parse_response(self, response_text: str) -> Optional[Dict[str, str]]:
@@ -165,11 +254,20 @@ You must output a JSON object:
             logger.error("Failed to parse model JSON")
             return None
 
+        # Safe parsing of optional boolean field "change_instruction"
+        raw_change = plan.get("change_instruction", True)
+        if isinstance(raw_change, str):
+            raw_lower = raw_change.strip().lower()
+            change_instruction = raw_lower in ("true", "1", "yes", "y")
+        else:
+            change_instruction = bool(raw_change)
+
         return {
             "thought": plan.get("thought", ""),
             "note": plan.get("note", ""),
             "status": plan.get("status", "NAVIGATING"),
             "instruction": plan.get("instruction", ""),
+            "change_instruction": change_instruction,
         }
 
     def plan_next_step(
@@ -178,6 +276,9 @@ You must output a JSON object:
         sys1_steps: Optional[int] = None,
         sys2_calls: Optional[int] = None,
         sys3_calls: Optional[int] = None,
+        current_instruction: Optional[str] = None,
+        subepisode_id: Optional[int] = None,
+        history_imgs: Optional[List[str]] = None,
     ) -> Optional[Dict[str, str]]:
         """
         Main VLM entrypoint:
@@ -193,11 +294,27 @@ You must output a JSON object:
         s2_calls = sys2_calls if sys2_calls is not None else 0
         s3_calls = sys3_calls if sys3_calls is not None else 0
         query = (
-            "Please provide a navigation instruction for the local navigation system. "
-            f"System 2 calls so far: {s2_calls}. System 3 calls so far: {s3_calls}."
+            "Please decide whether to KEEP the current navigation instruction or CHANGE it, "
+            "and provide your JSON response."
         )
 
-        user_msg = self.build_user_message(img_b64, query=query, sys2_calls=s2_calls, sys3_calls=s3_calls)
+        # Decide which frames to send: the provided history (sub-episode) or just the latest image.
+        if history_imgs:
+            frames_b64 = history_imgs
+            # Ensure the latest image is at the end of the sequence.
+            if frames_b64[-1] != img_b64:
+                frames_b64 = list(frames_b64) + [img_b64]
+        else:
+            frames_b64 = [img_b64]
+
+        user_msg = self.build_user_message(
+            frames_b64,
+            query=query,
+            sys2_calls=s2_calls,
+            sys3_calls=s3_calls,
+            current_instruction=current_instruction,
+            subepisode_id=subepisode_id,
+        )
         messages = self.history + [user_msg]
 
         try:
@@ -396,6 +513,13 @@ class System3Agent(InternVLAN1Agent):
         # Defaults: allow a new Sys3 call every 2 macro steps.
         self.sys3_interval_steps: int = config.model_settings.get("sys3_interval_steps", 8)
         self.last_sys3_step: int = -self.sys3_interval_steps
+        # If True, force a System 3 call on the next step, regardless of interval.
+        # Used when System 2 reports that its current local plan is DONE (STOP).
+        self.force_sys3_next: bool = False
+        # Sub-episode management for System 3
+        self.subepisode_id: int = 0
+        self.subepisode_frames_b64: List[str] = []
+        self.max_subepisode_frames: int = config.model_settings.get("sys3_max_subepisode_frames", 8)
         
         # Load System 3 config from config, fallback to env
         model_settings = config.model_settings
@@ -413,6 +537,9 @@ class System3Agent(InternVLAN1Agent):
         super().reset(reset_index)
         self.navigator = None
         self.current_instruction = None
+        self.subepisode_id = 0
+        self.subepisode_frames_b64 = []
+        self.force_sys3_next = False
 
     def set_goal(self, goal: str):
         """Initialize VLM Navigator with the high-level goal"""
@@ -426,7 +553,11 @@ class System3Agent(InternVLAN1Agent):
             self.navigator.dump_dir = self.prompt_dump_dir
             self.navigator.dump_freq = self.prompt_dump_freq
             self.navigator.dump_episode_id = self.prompt_dump_episode_id
-        self.current_instruction = goal # Default to original until VLM updates it
+        # The high-level goal doubles as the initial instruction until System 3 refines it.
+        self.current_instruction = goal
+        # Start first sub-episode.
+        self.subepisode_id = 0
+        self.subepisode_frames_b64 = []
 
     def set_prompt_dump(self, dump_dir: str, freq: int = 1, episode_id: Optional[int] = None):
         """Configure where/how often to dump prompts."""
@@ -448,7 +579,13 @@ class System3Agent(InternVLAN1Agent):
         # Handle single observation (batch size 1)
         current_obs = obs[0]
         rgb = current_obs['rgb'] # numpy array (H, W, 3)
-        
+        # Convert current frame once and append to sub-episode history
+        image = Image.fromarray(rgb.astype('uint8'), 'RGB')
+        img_b64 = pil_to_base64(image)
+        self.subepisode_frames_b64.append(img_b64)
+        if len(self.subepisode_frames_b64) > self.max_subepisode_frames:
+            # Keep only the most recent N frames in this sub-episode
+            self.subepisode_frames_b64 = self.subepisode_frames_b64[-self.max_subepisode_frames:]
         # 1. System 3 Logic: Only call if System 2 needs to run
         # We check self.should_infer_s2(self.mode) OR if we are looking down (which forces inference)
         # Note: 'look_down' logic is handled in super().step, but we need to know if we should update instruction now.
@@ -458,30 +595,52 @@ class System3Agent(InternVLAN1Agent):
         interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
 
         # TODO: better logic for calling sys3.
-        should_call_sys3 = should_call_sys2 and (interval_ok or self.episode_step == 0)
+        # If System 2 has just reported that its local plan is DONE (STOP),
+        # we set force_sys3_next=True so that System 3 immediately issues a
+        # new instruction, regardless of the usual interval throttle.
+        should_call_sys3 = should_call_sys2 and (
+            self.force_sys3_next or interval_ok or self.episode_step == 0
+        )
         if should_call_sys3:
-            # Convert numpy array to PIL Image
-            image = Image.fromarray(rgb.astype('uint8'), 'RGB')
-            img_b64 = pil_to_base64(image)
-            
-            # Plan next step
+            # Plan next step with System 3, using sub-episode history
             self.sys3_call_count += 1
             plan = self.navigator.plan_next_step(
                 img_b64,
                 sys1_steps=self.episode_step,
                 sys2_calls=self.sys2_call_count,
                 sys3_calls=self.sys3_call_count,
+                current_instruction=self.current_instruction,
+                subepisode_id=self.subepisode_id,
+                history_imgs=self.subepisode_frames_b64,
             )
             self.last_sys3_step = self.episode_step
+            # We have just made a System 3 call, so clear the force flag.
+            self.force_sys3_next = False
             
             if plan:
-                if plan.get("status") == "DONE":
-                        logger.info("[Sys3] Goal reached signal.")
-                        return [{'action': [0], 'ideal_flag': True}]
-                        
-                if plan.get("instruction"):
-                    self.current_instruction = plan.get("instruction")
-                    logger.info(f"[Sys3] New instruction: {self.current_instruction}")
+                status = plan.get("status")
+                change_instruction = plan.get("change_instruction", True)
+                new_instruction = plan.get("instruction")
+
+                if status == "DONE":
+                    logger.info(
+                        "[Sys3] Termination requested by System 3 (status=DONE, change_instruction=%s). "
+                        "Emitting STOP action (0) to environment.",
+                        change_instruction,
+                    )
+                    return [{'action': [0], 'ideal_flag': True}]
+
+                if change_instruction and new_instruction:
+                    # New instruction => start a new sub-episode, but no need to hard-reset Sys2 state.
+                    if new_instruction != self.current_instruction:
+                        self.current_instruction = new_instruction
+                        self.subepisode_id += 1
+                        # Start new sub-episode buffer with the latest frame only.
+                        self.subepisode_frames_b64 = [img_b64]
+                        logger.info(f"[Sys3] New instruction (sub-episode {self.subepisode_id}): {self.current_instruction}")
+                else:
+                    # Keep current instruction; just log that System 3 chose not to change it.
+                    logger.info(f"[Sys3] Keeping current instruction: {self.current_instruction}")
         
         # 2. Update instruction for System 2
         if self.current_instruction:
@@ -490,8 +649,41 @@ class System3Agent(InternVLAN1Agent):
         if should_call_sys2:
             self.sys2_call_count += 1  # track how many times Sys2 inference is requested
         
-        # 3. System 2 Logic: Call parent step
+        # 3. System 2 Logic: Call parent step.
+        # NOTE: InternVLAN1Agent uses a special "look_down" mechanism triggered
+        # by an internal S2 action=5. On the first call after that, it sets
+        # self.look_down=True and returns a NO-OP (-1) action while preparing
+        # internal state. On the *next* call with look_down=True, it uses that
+        # state to produce the actual navigation action.
+        #
+        # To preserve that behavior, we mirror the original pattern:
+        #   ret = super().step(obs)
+        #   if self.look_down: ret = super().step(obs)
+        #
+        # Our STOP interception logic is applied only to the final 'ret'.
         ret = super().step(obs)
         if self.look_down:
             ret = super().step(obs)
+
+        # Intercept System 2 STOP (action=0) so that it only ends the
+        # current sub-episode, not the whole Habitat episode.
+        # The full episode should terminate only when System 3 explicitly
+        # returns status="DONE" (handled earlier in this method).
+        try:
+            assert len(ret) == 1, "System 2 should return a list with one element"
+            if isinstance(ret, list) and ret and 'action' in ret[0]:
+                act = ret[0]['action'][0] if ret[0]['action'] else None
+                if act == 0:
+                    logger.info(
+                        "[Sys3] Intercepting System 2 STOP action (0) as sub-episode completion; "
+                        "converting to NO-OP (-1). Full episode termination is controlled by System 3."
+                    )
+                    ret[0]['action'][0] = -1
+                    ret[0]['ideal_flag'] = False
+                    # Mark that System 2 has finished its current local plan so that
+                    # System 3 is forced to compute a new instruction on the next step.
+                    self.force_sys3_next = True
+        except Exception as e:
+            logger.warning(f"[Sys3] Failed to post-process System 2 action: {e}")
+
         return ret
