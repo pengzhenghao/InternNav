@@ -1,4 +1,5 @@
 import argparse
+import logging
 import json
 import os
 import sys
@@ -45,6 +46,8 @@ import internnav.habitat_extensions.measures  # noqa: F401 # isort: skip
 
 DEFAULT_IMAGE_TOKEN = "<image>"
 
+logger = logging.getLogger(__name__)
+
 
 @Evaluator.register('habitat_vln')
 class HabitatVLNEvaluator(DistributedEvaluator):
@@ -56,7 +59,8 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         # Append a timestamped run id to log directory to avoid collisions
         run_ts = time.strftime("%Y%m%d_%H%M%S")
         self.run_ts = run_ts
-        self.output_path = os.path.join(args.output_path, run_ts)
+        logger.info("HabitatVLNEvaluator init: output_path=%s run_ts=%s", args.output_path, run_ts)
+        self.output_path = "{}_{}".format(args.output_path, run_ts)
 
         # create habitat config
         self.config_path = cfg.env.env_settings['config_path']
@@ -272,7 +276,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             episode_instruction = (
                 episode.instruction.instruction_text if 'objectnav' not in self.config_path else episode.object_category
             )
-            print("episode start", episode_instruction)
+            logger.info("Episode start %s_%04d: %s", scene_id, episode_id, episode_instruction)
 
             if hasattr(self, 'agent') and self.agent is not None:
                 self.agent.reset(reset_index=0)
@@ -653,10 +657,15 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             oss.append(metrics['oracle_success'])
             nes.append(metrics["distance_to_goal"])
 
-            print(
-                f"scene_episode {scene_id}_{episode_id:04d} success: {metrics['success']}, "
-                f"spl: {metrics['spl']}, os: {metrics['oracle_success']}, "
-                f"ne: {metrics['distance_to_goal']}"
+            logger.info(
+                "Episode end %s_%04d | success=%.3f spl=%.3f os=%.3f ne=%.3f steps=%d",
+                scene_id,
+                episode_id,
+                metrics['success'],
+                metrics['spl'],
+                metrics['oracle_success'],
+                metrics['distance_to_goal'],
+                step_id,
             )
 
             # Write per-episode result.json entry (still per-rank)

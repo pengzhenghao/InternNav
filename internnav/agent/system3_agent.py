@@ -72,6 +72,8 @@ class VLMNavigator:
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.user_goal = user_goal
         self.history: List[Dict] = []
+        # Human-readable, cumulative prompt/response snapshots for quick inspection
+        self.human_log_history: List[str] = []
         self.last_instruction = None
         self.last_note = None
         self.dump_dir: Optional[str] = None
@@ -86,26 +88,46 @@ class VLMNavigator:
         system_prompt = f"""You are an advanced autonomous robot agent. 
 The user has given you a high-level goal: "{self.user_goal}".
 
+Architecture context:
+- System 1: low-level controller that executes the local navigation actions from System 2.
+- System 2: local navigation planner that follows short, concrete text instructions (e.g., "Turn left 1 meter, then go to the door").
+- System 3 (you): VLM that observes vision, maintains intent, and issues the next concise instruction to System 2.
+
 You have access to a robot's visual feed. You control a local navigation system (System 2) that takes short, simple text descriptions of where to go next.
+Reaching within 3 meters of the final goal counts as success.
+You will be told the running counters for System 2 and System 3 calls; use them when pacing your decisions.
+
+Strategic Guidelines:
+1. Search First: If you cannot clearly see your next milestone or are uncertain about your location relative to the goal, DO NOT assume the path is forward. Issue instructions to look around (e.g., "Turn left 30 degrees to search", "Look around") to orient yourself.
+2. Verify Targets: Ensure the target you are heading towards is actually the correct one. If the goal is "door" but you are facing a staircase, check your surroundings first.
+3. Reflect on Progress: In your "thought", explicitly evaluate if your previous actions brought you closer to the high-level goal. If not, adjust your strategy (e.g., from moving to searching).
+4. Subgoals: Break the user goal into immediate, concrete subgoals. Use these as the instruction for System 2.
 
 Your Loop:
 1. Analyze the current image.
-2. Determine if the goal is reached.
-3. If not, plan the immediate next step.
-4. Output a navigation instruction for the local system.
+2. Determine if the goal is reached (success once within 3 meters).
+3. Reflect on current progress and validity of the previous plan.
+4. If not reached, plan the immediate next step (Search or Move) by selecting a specific subgoal.
+5. Output a navigation instruction for the local system.
 
 Output Format:
 You must output a JSON object:
 {{
-  "thought": "Your reasoning here...",
+  "thought": "Reflect on progress, visibility of target, and why this new step is chosen...",
   "status": "NAVIGATING" | "SEARCHING" | "DONE",
-  "instruction": "Short phrase for System 2 (e.g. 'Go to the door')",
+  "instruction": "Informative text describing the next step (e.g. 'Turn left to scan for the door.')",
   "note": "One-line summary of the current scenario/progress to remind yourself in the next step"
 }}
 """
         self.history.append({"role": "system", "content": system_prompt})
 
-    def build_user_message(self, img_b64: str, query: str = "What should I do next?") -> Dict:
+    def build_user_message(
+        self,
+        img_b64: str,
+        query: str = "What should I do next?",
+        sys2_calls: int = 0,
+        sys3_calls: int = 0,
+    ) -> Dict:
         """Prepare the multimodal user message for the VLM."""
         
         # TODO: can add system 2 annotated images back here.
@@ -114,6 +136,7 @@ You must output a JSON object:
             "role": "user",
             "content": [
                 {"type": "text", "text": "Here is the current image."},
+                {"type": "text", "text": f"System 2 calls so far: {sys2_calls}. System 3 calls so far: {sys3_calls}."},
                 {
                     "type": "image_url",
                     "image_url": {
@@ -167,17 +190,22 @@ You must output a JSON object:
             return None
 
         # Keep the user query minimal; rely on message history for context
-        query = "Please provide a navigation instruction for the local navigation system."
+        s2_calls = sys2_calls if sys2_calls is not None else 0
+        s3_calls = sys3_calls if sys3_calls is not None else 0
+        query = (
+            "Please provide a navigation instruction for the local navigation system. "
+            f"System 2 calls so far: {s2_calls}. System 3 calls so far: {s3_calls}."
+        )
 
-        user_msg = self.build_user_message(img_b64, query=query)
+        user_msg = self.build_user_message(img_b64, query=query, sys2_calls=s2_calls, sys3_calls=s3_calls)
         messages = self.history + [user_msg]
 
         try:
             completion = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                max_tokens=1024,
-                temperature=0.1,
+                max_tokens=2000,
+                # temperature=0.1,
             )
         except Exception as e:
             logger.error(f"LLM Call Failed: {e}")
@@ -229,7 +257,8 @@ You must output a JSON object:
                             "type": "text", 
                             "text": (
                                 f"[Step {step_idx} | {time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                                f"Status: {status}. Instruction: {instruction}. Note: {note}. Thought: {thought}. Image: "
+                                f"Status: {status}. Instruction: {instruction}. Note: {note}. Thought: {thought}. "
+                                f"Sys2 calls: {s2_calls}. Sys3 calls: {s3_calls}."
                             )
                         },
                         {
@@ -284,6 +313,66 @@ You must output a JSON object:
             # print("in _dump_messages, step_path:", step_path)
             with open(step_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            # Also persist a human-readable version for quick inspection
+            sep = "=" * 72
+            sub_sep = "-" * 56
+            human_lines = [
+                sep,
+                f"System 3 Prompt Log | Step {step_idx} | {payload['timestamp']}",
+                sep,
+                f"Sys1 steps : {sys1_steps}",
+                f"Sys2 calls : {sys2_calls}",
+                f"Sys3 calls : {sys3_calls}",
+                "",
+                "Messages (model input)",
+                sub_sep,
+            ]
+
+            for idx, msg in enumerate(no_image_messages):
+                role = msg.get("role", "unknown")
+                human_lines.append(f"[Message {idx}] role={role}")
+                content = msg.get("content", "")
+
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            human_lines.append(f"    - {part}")
+                            continue
+
+                        ptype = part.get("type", "text")
+                        if ptype == "text":
+                            human_lines.append(f"    - text: {part.get('text', '')}")
+                        elif ptype == "image_url":
+                            image_val = part.get("image_url", "<image>")
+                            if isinstance(image_val, dict):
+                                image_val = image_val.get("url", "<image>")
+                            human_lines.append(f"    - image: {image_val}")
+                        else:
+                            human_lines.append(f"    - {ptype}: {part}")
+                else:
+                    human_lines.append(f"    - {content}")
+
+            human_lines.extend(
+                [
+                    "",
+                    "Model response (raw)",
+                    sub_sep,
+                    response_text,
+                    "",
+                    "Parsed plan",
+                    sub_sep,
+                    json.dumps(plan, ensure_ascii=False, indent=2),
+                    "",
+                    sep,
+                ]
+            )
+
+            # Keep a cumulative stack so previous steps stay visible
+            self.human_log_history.append("\n".join(human_lines))
+            human_path = os.path.splitext(step_path)[0] + ".txt"
+            with open(human_path, "w", encoding="utf-8") as f_txt:
+                f_txt.write("\n\n".join(self.human_log_history))
         except Exception as e:
             logger.error(f"[Sys3] Failed to write prompt log: {e}")
 
@@ -305,7 +394,7 @@ class System3Agent(InternVLAN1Agent):
         self.sys2_call_count: int = 0
         # Throttle System3 invocations to avoid over-calling VLM.
         # Defaults: allow a new Sys3 call every 2 macro steps.
-        self.sys3_interval_steps: int = config.model_settings.get("sys3_interval_steps", 2)
+        self.sys3_interval_steps: int = config.model_settings.get("sys3_interval_steps", 8)
         self.last_sys3_step: int = -self.sys3_interval_steps
         
         # Load System 3 config from config, fallback to env
@@ -368,7 +457,8 @@ class System3Agent(InternVLAN1Agent):
         should_call_sys2 = self.should_infer_s2(self.mode) or self.look_down
         interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
 
-        should_call_sys3 = should_call_sys2 and interval_ok
+        # TODO: better logic for calling sys3.
+        should_call_sys3 = should_call_sys2 and (interval_ok or self.episode_step == 0)
         if should_call_sys3:
             # Convert numpy array to PIL Image
             image = Image.fromarray(rgb.astype('uint8'), 'RGB')
@@ -401,4 +491,7 @@ class System3Agent(InternVLAN1Agent):
             self.sys2_call_count += 1  # track how many times Sys2 inference is requested
         
         # 3. System 2 Logic: Call parent step
-        return super().step(obs)
+        ret = super().step(obs)
+        if self.look_down:
+            ret = super().step(obs)
+        return ret
