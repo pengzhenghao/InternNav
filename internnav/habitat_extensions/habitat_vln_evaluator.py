@@ -57,6 +57,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         self.save_video = args.save_video
         self.epoch = args.epoch
         self.max_steps_per_episode = args.max_steps_per_episode
+        logger.info("Max steps per episode is set to %d", self.max_steps_per_episode)
         # Append a timestamped run id to log directory to avoid collisions
         run_ts = time.strftime("%Y%m%d_%H%M%S")
         self.run_ts = run_ts
