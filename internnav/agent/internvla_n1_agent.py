@@ -111,6 +111,8 @@ class InternVLAN1Agent(Agent):
         else:
             self.episode_idx = -1
 
+        logger.info(f"[Sys2] Agent Reset. New episode_idx: {self.episode_idx}")
+
         self.episode_step = 0
         self.s1_input = S1Input()
         with self.s2_input_lock:

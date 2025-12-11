@@ -31,6 +31,54 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+STEP_OUTPUT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "output_navigation_plan",
+        "description": "Output the navigation plan, status, and thought process.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "thought": {
+                    "type": "string",
+                    "description": "Reflect on progress, visibility of target, and why this new step is chosen."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["NAVIGATING", "SEARCHING", "VERIFICATION", "DONE"],
+                    "description": "The current status. 'NAVIGATING': Moving to a visible target. 'SEARCHING': Looking for the goal/landmarks. 'VERIFICATION': At goal, confirming success. 'DONE': Goal achieved."
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "Informative text describing the next step for System 2."
+                },
+                "change_instruction": {
+                    "type": "boolean",
+                    "description": "True if the instruction should be changed, False to keep the current one."
+                },
+                "discrete_actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["MOVE_FORWARD", "TURN_LEFT", "TURN_RIGHT", "STOP", "LOOK_UP", "LOOK_DOWN"]
+                    },
+                    "description": "Optional list of discrete actions to execute directly, bypassing the local planner. Use this for precise short-term control."
+                }
+            },
+            "required": ["thought", "status", "instruction", "change_instruction"]
+        }
+    }
+}
+
+ACTION_NAME_TO_ID = {
+    "STOP": 0,
+    "MOVE_FORWARD": 1,
+    "TURN_LEFT": 2,
+    "TURN_RIGHT": 3,
+    "LOOK_UP": 4,
+    "LOOK_DOWN": 5,
+}
+
 def redact_image_urls(obj):
     """
     Recursively traverse a list or dict. 
@@ -75,7 +123,6 @@ class VLMNavigator:
         # Human-readable, cumulative prompt/response snapshots for quick inspection
         self.human_log_history: List[str] = []
         self.last_instruction = None
-        self.last_note = None
         self.dump_dir: Optional[str] = None
         self.dump_freq: int = 1
         self.dump_episode_id: Optional[int] = None
@@ -97,11 +144,17 @@ You have access to a robot's visual feed. You control a local navigation system 
 Reaching within 3 meters of the final goal counts as success. If the goal is a specific target (e.g., "the red door", "the table with a laptop"), treat success as being clearly at that target and within roughly 3 meters of it.
 You will be told the running counters for System 2 and System 3 calls; use them when pacing your decisions.
 
+Status Definitions:
+- NAVIGATING: You see the next subgoal or target and are moving towards it.
+- SEARCHING: You cannot see the next subgoal/target, so you are looking around or exploring to find it.
+- VERIFICATION: You believe you have reached the final goal, but you are performing a final check (e.g., looking around) to confirm.
+- DONE: You have verified that the goal is accomplished.
+
 Strategic Guidelines:
 1. Search First: If you cannot clearly see your next milestone or are uncertain about your location relative to the goal, DO NOT assume the path is forward. Issue instructions to look around (e.g., "Turn left 30 degrees to search", "Look around") to orient yourself.
 2. Verify Targets: Ensure the target you are heading towards is actually the correct one. If the goal is "door" but you are facing a staircase, check your surroundings first.
 3. Reflect on Progress: In your "thought", explicitly evaluate if your previous actions brought you closer to the high-level goal. If not, adjust your strategy (e.g., from moving to searching).
-4. Subgoals: Break the user goal into immediate, concrete subgoals. Use these as the instruction for System 2.
+4. Subgoals & Phrasing: Break the user goal into immediate, concrete subgoals. Use these as the instruction for System 2. IMPORTANT: Avoid complex spatial constraints like "keeping X on your left". System 2 often interprets "left" or "right" in such phrases as immediate turn commands. Instead, specify the target or direction directly (e.g., "Walk forward past the table", "Go to the white door").
 5. Verification Stage: When you believe you have reached the goal, DO NOT immediately output DONE. Instead, switch to "VERIFICATION" status and look around to confirm the goal is truly achieved. During VERIFICATION, carefully check (based on the visuals) that you are actually at the correct target and are within roughly 3 meters of it. Only output DONE after this verification passes.
 
 Your Loop:
@@ -111,16 +164,7 @@ Your Loop:
 4. If you think you have arrived, trigger "VERIFICATION" status and issue instructions to look around (e.g., "Turn 360 degrees to verify context") to make sure the goal is really achieved.
 5. If in "VERIFICATION" status and you confirm the goal is achieved AND you are within roughly 3 meters of the target, output "DONE". Otherwise, continue NAVIGATING or SEARCHING.
 6. If not reached, plan the immediate next step (Search or Move) by selecting a specific subgoal.
-7. Output a navigation instruction for the local system.
-
-Output Format:
-You must output a JSON object:
-{{
-  "thought": "Reflect on progress, visibility of target, and why this new step is chosen...",
-  "status": "NAVIGATING" | "SEARCHING" | "VERIFICATION" | "DONE",
-  "instruction": "Informative text describing the next step (e.g. 'Turn left to scan for the door.')",
-  "note": "One-line summary of the current scenario/progress to remind yourself in the next step"
-}}
+7. Output a navigation instruction for the local system using the provided tool.
 """
         self.history.append({"role": "system", "content": system_prompt})
 
@@ -218,19 +262,6 @@ You must output a JSON object:
                 }
             )
 
-        # Remind the model about the desired JSON format including change_instruction.
-        content.append(
-            {
-                "type": "text",
-                "text": (
-                    "Respond ONLY with a JSON object of the form: "
-                    '{"thought": "...", "status": "NAVIGATING" | "SEARCHING" | "VERIFICATION" | "DONE", '
-                    '"instruction": "...", "note": "...", "change_instruction": true | false}. '
-                    'Set "change_instruction" to false if the current instruction should be KEPT.'
-                ),
-            }
-        )
-
         # Final query/instruction to the model
         content.append({"type": "text", "text": query})
 
@@ -239,25 +270,20 @@ You must output a JSON object:
             "content": content,
         }
 
-    def _parse_response(self, response_text: str) -> Optional[Dict[str, str]]:
+    def _parse_response(self, tool_call) -> Optional[Dict[str, Any]]:
         """
-        Extract JSON from the model output and normalise the plan structure.
-        Returns a dict with keys: thought, status, instruction or None on failure.
+        Extract JSON from the tool call arguments.
+        Returns a dict with keys: thought, status, instruction, note, change_instruction.
         """
         try:
-            start = response_text.find("{")
-            end = response_text.rfind("}") + 1
-            if start == -1 or end == 0:
-                logger.error("Could not find JSON in response:", response_text)
-                return None
-
-            json_str = response_text[start:end]
-            plan = json.loads(json_str)
+            arguments = tool_call.function.arguments
+            plan = json.loads(arguments)
         except json.JSONDecodeError:
-            logger.error("Failed to parse model JSON")
+            logger.error(f"Failed to parse tool arguments: {arguments}")
             return None
 
         # Safe parsing of optional boolean field "change_instruction"
+        # Tool use should enforce boolean, but good to be safe if model hallucinates string
         raw_change = plan.get("change_instruction", True)
         if isinstance(raw_change, str):
             raw_lower = raw_change.strip().lower()
@@ -267,10 +293,10 @@ You must output a JSON object:
 
         return {
             "thought": plan.get("thought", ""),
-            "note": plan.get("note", ""),
             "status": plan.get("status", "NAVIGATING"),
             "instruction": plan.get("instruction", ""),
             "change_instruction": change_instruction,
+            "discrete_actions": plan.get("discrete_actions", []),
         }
 
     def plan_next_step(
@@ -286,7 +312,7 @@ You must output a JSON object:
         """
         Main VLM entrypoint:
         - builds messages
-        - calls the model
+        - calls the model with tools
         - parses and logs the plan
         - appends a compact textual summary to history
         """
@@ -298,7 +324,7 @@ You must output a JSON object:
         s3_calls = sys3_calls if sys3_calls is not None else 0
         query = (
             "Please decide whether to KEEP the current navigation instruction or CHANGE it, "
-            "and provide your JSON response."
+            "and use the tool to output your decision."
         )
 
         # Decide which frames to send: the provided history (sub-episode) or just the latest image.
@@ -325,23 +351,49 @@ You must output a JSON object:
                 model=self.model_name,
                 messages=messages,
                 max_tokens=2000,
-                # temperature=0.1,
+                tools=[STEP_OUTPUT_TOOL],
+                tool_choice={"type": "function", "function": {"name": "output_navigation_plan"}},
             )
         except Exception as e:
             logger.error(f"LLM Call Failed: {e}")
             return None
 
-        response_text = completion.choices[0].message.content
-        logger.debug(f"[Sys3] Raw VLM Response: {response_text}")
+        response_message = completion.choices[0].message
+        
+        # Capture any natural language reasoning/content that occurred before the tool call
+        # Some models output "thinking" traces in the content field even when calling tools.
+        content_reasoning = response_message.content or ""
 
-        plan = self._parse_response(response_text)
+        tool_calls = response_message.tool_calls
+        
+        if not tool_calls:
+            logger.error("Model did not call the required tool.")
+            return None
+            
+        # We expect exactly one tool call due to tool_choice enforcement
+        tool_call = tool_calls[0]
+        response_text = tool_call.function.arguments # For logging purposes
+        logger.debug(f"[Sys3] Raw VLM Tool Args: {response_text}")
+        if content_reasoning:
+            logger.debug(f"[Sys3] Raw VLM Content (Reasoning): {content_reasoning}")
+
+        plan = self._parse_response(tool_call)
         if not plan:
             return None
+
+        # Merge content reasoning with structured thought
+        tool_thought = plan.get("thought", "")
+        combined_thought_parts = []
+        if content_reasoning.strip():
+            combined_thought_parts.append(content_reasoning.strip())
+        if tool_thought.strip():
+            combined_thought_parts.append(tool_thought.strip())
+        
+        plan["thought"] = "\n\n".join(combined_thought_parts)
 
         thought = plan["thought"]
         status = plan["status"]
         instruction = plan["instruction"]
-        note = plan["note"]
 
         # TODO: step should include sys2 and sys1 and sys3 steps.
         step_idx = self.history.__len__() // 2  # each assistant add bumps this
@@ -362,13 +414,13 @@ You must output a JSON object:
             f"\n[Sys3] Step {step_idx}\n"
             f"  Status      : {status}\n"
             f"  Instruction : {instruction}\n"
-            f"  Note        : {note}\n"
-            f"  Thought     : {thought[:400]}\n"
+            f"  Thought     : {thought}\n"
         )
 
 
         # Maintain a compact text-only summary to keep context small
-        if instruction or thought:
+        # NOTE: We DO NOT add the 'thought' to the history, only the instruction/status.
+        if instruction:
             self.history.append(
                 {
                     "role": "user",
@@ -377,8 +429,9 @@ You must output a JSON object:
                             "type": "text", 
                             "text": (
                                 f"[Step {step_idx} | {time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                                f"Status: {status}. Instruction: {instruction}. Note: {note}. Thought: {thought}. "
-                                f"Sys2 calls: {s2_calls}. Sys3 calls: {s3_calls}."
+                                f"Sys2 calls: {s2_calls}. Sys3 calls: {s3_calls}. "
+                                f"Status: {status}. Instruction: {instruction}. "
+                                f"Thought: {thought}."
                             )
                         },
                         {
@@ -392,7 +445,6 @@ You must output a JSON object:
             )
             # Update history trackers
             self.last_instruction = instruction
-            self.last_note = note
 
         return plan
 
@@ -543,6 +595,8 @@ class System3Agent(InternVLAN1Agent):
         self.subepisode_id = 0
         self.subepisode_frames_b64 = []
         self.force_sys3_next = False
+        self.sys3_call_count = 0
+        self.sys2_call_count = 0
 
     def set_goal(self, goal: str):
         """Initialize VLM Navigator with the high-level goal"""
@@ -624,6 +678,7 @@ class System3Agent(InternVLAN1Agent):
                 status = plan.get("status")
                 change_instruction = plan.get("change_instruction", True)
                 new_instruction = plan.get("instruction")
+                discrete_actions = plan.get("discrete_actions", [])
 
                 if status == "DONE":
                     logger.info(
@@ -632,6 +687,36 @@ class System3Agent(InternVLAN1Agent):
                         change_instruction,
                     )
                     return [{'action': [0], 'ideal_flag': True}]
+
+                # Check for discrete actions to bypass System 2
+                if discrete_actions:
+                    actions_list = []
+                    for act_name in discrete_actions:
+                        if act_name in ACTION_NAME_TO_ID:
+                            actions_list.append(ACTION_NAME_TO_ID[act_name])
+                        else:
+                            logger.warning(f"[Sys3] Unknown discrete action: {act_name}")
+                    
+                    if actions_list:
+                        logger.info(f"[Sys3] Executing discrete actions: {discrete_actions} -> {actions_list}")
+                        with self.s2_output_lock:
+                            self.s2_output.output_action = actions_list
+                            self.s2_output.output_pixel = None
+                            self.s2_output.output_latent = None
+                            self.s2_output.is_infering = False
+                        
+                        # Discrete actions take precedence. We set them, so InternVLAN1Agent.step() 
+                        # will see them and skip S2 inference, effectively bypassing the local planner.
+                        # We also force a System 3 call on the next step after these actions are done,
+                        # to ensure System 3 stays in control.
+                        # However, we don't know exactly when they finish if >1. 
+                        # InternVLAN1Agent consumes one per step.
+                        # If we want System 3 to be called again after the queue is empty, 
+                        # we rely on force_sys3_next being set when the queue empties?
+                        # Currently InternVLAN1Agent sets force_sys3_next ONLY if it emits STOP.
+                        # We might need to handle this.
+                        # For now, let's just let it run. If queue empties, S2 inference triggers next time.
+                        pass
 
                 if change_instruction and new_instruction:
                     # New instruction => start a new sub-episode, but no need to hard-reset Sys2 state.
