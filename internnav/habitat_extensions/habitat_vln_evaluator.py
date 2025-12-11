@@ -280,6 +280,14 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             )
             logger.info("Episode start %s_%04d: %s", scene_id, episode_id, episode_instruction)
 
+            # Log dump setup
+            log_dump_dir = os.path.join(self.output_path, f'log_{self.epoch}', f'{scene_id}')
+            os.makedirs(log_dump_dir, exist_ok=True)
+            episode_log_file = os.path.join(log_dump_dir, f'{episode_id}.log')
+            file_handler = logging.FileHandler(episode_log_file, mode='w')
+            file_handler.setFormatter(logging.Formatter("%(asctime)s | %(name)s | %(levelname)s | %(message)s"))
+            logging.getLogger().addHandler(file_handler)
+
             if hasattr(self, 'agent') and self.agent is not None:
                 self.agent.reset(reset_index=0)
                 if hasattr(self.agent, 'set_goal'):
@@ -302,9 +310,9 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             agent = ShortestPathFollower(self.env._env.sim, 0.25, False)
 
             # save first frame per rank to validate sim quality
-            os.makedirs(os.path.join(self.output_path, f'check_sim_{self.epoch}'), exist_ok=True)
+            os.makedirs(os.path.join(self.output_path, f'check_sim_{self.epoch}', f'{scene_id}'), exist_ok=True)
             Image.fromarray(observations['rgb']).save(
-                os.path.join(self.output_path, f'check_sim_{self.epoch}', f'rgb_{self.rank}.jpg')
+                os.path.join(self.output_path, f'check_sim_{self.epoch}', f'{scene_id}', f'rgb_{episode_id:04d}.jpg')
             )
 
             vis_frames = []
@@ -839,6 +847,9 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                     quality=9,
                 )
             vis_frames.clear()
+
+            logging.getLogger().removeHandler(file_handler)
+            file_handler.close()
 
         self.env.close()
 
