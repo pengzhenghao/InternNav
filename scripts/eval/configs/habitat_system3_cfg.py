@@ -43,7 +43,7 @@ eval_cfg = EvalCfg(
         "output_path": "./logs/habitat/test_system3",  # output directory for logs/results
         "save_video": True,  # whether to save videos
         "epoch": 0,  # epoch number for logging
-        "max_steps_per_episode": 500,  # maximum steps per episode
+        "max_steps_per_episode": 100,  # maximum steps per episode
         # distributed settings
         "port": "2334",  # communication port
         "dist_url": "env://",  # url for distributed setup
