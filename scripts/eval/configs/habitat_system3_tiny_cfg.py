@@ -27,7 +27,7 @@ eval_cfg = EvalCfg(
             "predict_step_nums": 32,
             "continuous_traj": True,
             "max_new_tokens": 1024,
-            "vis_debug": False, # InternVLAN1Agent needs this
+            "vis_debug": True, # InternVLAN1Agent needs this
         },
     ),
     env=EnvCfg(
@@ -41,7 +41,7 @@ eval_cfg = EvalCfg(
         "output_path": "./logs/habitat/test_system3_tiny",
         "save_video": True,
         "epoch": 0,
-        "max_steps_per_episode": 100,
+        "max_steps_per_episode": 200,
         "port": "2334",
         "dist_url": "env://",
     },

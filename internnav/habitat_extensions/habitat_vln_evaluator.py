@@ -162,6 +162,15 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             }
         )
 
+        # For agent-driven modes (e.g., System 3), we mimic the original
+        # dual-system behavior around LOOK_DOWN (5) and LOOK_UP (4):
+        #   - When the agent emits 5, we apply two env steps of 5 to obtain
+        #     a proper look-down image for pixel-goal prediction.
+        #   - Before executing the *next* non-5 action, we apply two env
+        #     steps of 4 to bring the camera back to horizontal.
+        # This state keeps track of how many LOOK_UP actions we still owe.
+        self._pending_look_up_steps: int = 0
+
         self.objectnav_instructions = ["Search for the {target_object}."]
 
         self.num_frames = self.model_args.num_frames
@@ -459,10 +468,37 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
                         vis_frames.append(frame)
 
+                    # For agent-driven modes (e.g., System 3), we mimic the
+                    # original dual-system evaluator's hard-coded camera tilt
+                    # protocol around LOOK_DOWN (5) / LOOK_UP (4):
+                    #
+                    #   - When the agent emits 5, we apply two env steps with
+                    #     action=5 to obtain a proper look-down image for
+                    #     pixel-goal prediction.
+                    #   - Before executing the first subsequent non-5 action
+                    #     (typically the start of the S1 local trajectory),
+                    #     we apply two env steps with action=4 to bring the
+                    #     camera back to horizontal.
+                    #
+                    # This guarantees that every explicit LOOK_DOWN request
+                    # from the planner is paired with a matching LOOK_UP
+                    # sequence at the environment level, regardless of the
+                    # learned model's own 4/5 pattern.
                     if action == 5:
-                        self.env.step(action)
-                        observations, _, done, _ = self.env.step(action)
+                        # Apply two look-down steps to the simulator.
+                        _, _, done, _ = self.env.step(5)
+                        observations, _, done, _ = self.env.step(5)
+                        # Schedule two LOOK_UP actions to be applied just
+                        # before the next non-5 agent action.
+                        self._pending_look_up_steps = 2
                     else:
+                        # If we owe LOOK_UP steps from a prior LOOK_DOWN,
+                        # apply them now before executing this non-5 action.
+                        if self._pending_look_up_steps > 0:
+                            for _ in range(self._pending_look_up_steps):
+                                observations, _, done, _ = self.env.step(4)
+                            self._pending_look_up_steps = 0
+                        # Execute the agent's actual action.
                         observations, _, done, _ = self.env.step(action)
 
                     if done and not done_by_env_flag:
