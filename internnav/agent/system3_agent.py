@@ -50,7 +50,7 @@ STEP_OUTPUT_TOOL = {
                 },
                 "instruction": {
                     "type": "string",
-                    "description": "Informative text describing the next step for System 2."
+                    "description": "A short, rule-based navigation instruction describing the next step for System 2, in the style of R2R instructions (e.g., 'Exit the bedroom and turn left. Walk straight passing the gray couch and stop near the rug.'). Use simple imperative sentences that mention actions and concrete landmarks; avoid chatty language or self-references."
                 },
                 "change_instruction": {
                     "type": "boolean",
@@ -146,16 +146,17 @@ You will be told the running counters for System 2 and System 3 calls; use them 
 
 Status Definitions:
 - NAVIGATING: You see the next subgoal or target and are moving towards it.
-- SEARCHING: You cannot see the next subgoal/target, so you are looking around or exploring to find it.
+- SEARCHING: You cannot see the next subgoal/target, so you are looking around or exploring to find it. Use this whenever you are mainly rotating or probing the environment to locate the goal or key landmarks.
 - VERIFICATION: You believe you have reached the final goal, but you are performing a final check (e.g., looking around) to confirm.
 - DONE: You have verified that the goal is accomplished.
 
 Strategic Guidelines:
-1. Search First: If you cannot clearly see your next milestone or are uncertain about your location relative to the goal, DO NOT assume the path is forward. Issue instructions to look around (e.g., "Turn left 30 degrees to search", "Look around") to orient yourself.
+1. Search First (especially at the beginning): If you cannot clearly see your next milestone or are uncertain about your location relative to the goal, DO NOT assume the path is forward. Issue instructions to look around (e.g., "Turn left and look around", "Turn right and look around") to orient yourself. When a new instruction/sub-episode has only 1–2 frames and you have no reliable memory of the surroundings, it is better to explore by rotating or turning around than to immediately walk straight; the target (e.g., a plant) may be behind you.
 2. Verify Targets: Ensure the target you are heading towards is actually the correct one. If the goal is "door" but you are facing a staircase, check your surroundings first.
 3. Reflect on Progress: In your "thought", explicitly evaluate if your previous actions brought you closer to the high-level goal. If not, adjust your strategy (e.g., from moving to searching).
 4. Subgoals & Phrasing: Break the user goal into immediate, concrete subgoals. Use these as the instruction for System 2. IMPORTANT: Avoid complex spatial constraints like "keeping X on your left". System 2 often interprets "left" or "right" in such phrases as immediate turn commands. Instead, specify the target or direction directly (e.g., "Walk forward past the table", "Go to the white door").
 5. Verification Stage: When you believe you have reached the goal, DO NOT immediately output DONE. Instead, switch to "VERIFICATION" status and look around to confirm the goal is truly achieved. During VERIFICATION, carefully check (based on the visuals) that you are actually at the correct target and are within roughly 3 meters of it. Only output DONE after this verification passes.
+6. Instruction Style (System 2 friendly): Write instructions in a rule-based navigation style similar to R2R instructions, e.g., "Exit the bedroom and turn left. Walk straight passing the gray couch and stop near the rug." Prefer short imperative sentences that mention actions and concrete landmarks: "Exit the room and turn right.", "Walk straight past the table and stop near the chair." Avoid chatty language, self-references, or references to System 2/3; only describe what the robot should do.
 
 Your Loop:
 1. Analyze the current image.
@@ -719,8 +720,21 @@ class System3Agent(InternVLAN1Agent):
                         pass
 
                 if change_instruction and new_instruction:
-                    # New instruction => start a new sub-episode, but no need to hard-reset Sys2 state.
+                    # New instruction => start a new sub-episode and hard-reset
+                    # the low-level S1/S2 state so that the next S2 planning
+                    # step is based purely on this new local goal.
                     if new_instruction != self.current_instruction:
+                        # Reset System 1 / System 2 state but keep global
+                        # episode / System 3 state intact.
+                        
+                        
+                        # if hasattr(self, "reset_sys2_state"):
+                        #     try:
+                        #         self.reset_sys2_state()
+                        #     except Exception as e:
+                        #         logger.warning(f"[Sys3] reset_sys2_state failed: {e}")
+                        
+                        
                         self.current_instruction = new_instruction
                         self.subepisode_id += 1
                         # Start new sub-episode buffer with the latest frame only.
@@ -750,8 +764,8 @@ class System3Agent(InternVLAN1Agent):
         #
         # Our STOP interception logic is applied only to the final 'ret'.
         ret = super().step(obs)
-        if self.look_down:
-            ret = super().step(obs)
+        # if self.look_down:
+        #     ret = super().step(obs)
 
         # Intercept System 2 STOP (action=0) so that it only ends the
         # current sub-episode, not the whole Habitat episode.

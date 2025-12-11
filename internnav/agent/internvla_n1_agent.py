@@ -33,6 +33,16 @@ class InternVLAN1Agent(Agent):
 
     def __init__(self, config: AgentCfg):
         super().__init__(config)
+        # This base agent is not meant to be used directly anymore.
+        # It is only a shared implementation for higher-level agents
+        # such as `System3Agent`.  To avoid accidental use of the
+        # deprecated `internvla_n1` agent entry, we hard-fail when
+        # this exact class is instantiated.
+        if type(self) is InternVLAN1Agent:
+            raise ValueError(
+                "InternVLAN1Agent is deprecated and should not be used directly. "
+                "Please use the System 3 agent or the dual-system evaluator instead."
+            )
         set_random_seed(0)
         vln_sensor_config = self.config.model_settings
         self._model_settings = ModelCfg(**vln_sensor_config)
@@ -332,6 +342,29 @@ class InternVLAN1Agent(Agent):
                 self.s2_input.look_down = self.look_down
                 self.s2_output.is_infering = True  # for async
 
+            # Optional: dump the look-down image/depth for debugging.
+            # This is the frame that will be used by System 2 to generate
+            # the pixel goal when `self.look_down` is True.
+            if self.look_down and self.vis_debug:
+                try:
+                    os.makedirs(self.debug_path, exist_ok=True)
+                    Image.fromarray(rgb).save(
+                        os.path.join(
+                            self.debug_path,
+                            f"lookdown_rgb_ep{self.episode_idx}_step{self.episode_step}.png",
+                        )
+                    )
+                    # Save a depth visualization (single-channel) for inspection.
+                    depth_vis = (depth[:, :, 0] * 255.0).clip(0, 255).astype(np.uint8)
+                    Image.fromarray(depth_vis).save(
+                        os.path.join(
+                            self.debug_path,
+                            f"lookdown_depth_ep{self.episode_idx}_step{self.episode_step}.png",
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[Sys2] Failed to dump look-down frame: {e}")
+
             logger.info(f"[Sys2] Calling S2 inference for instruction: {instruction}")
 
             self.dual_forward_step = 0
@@ -363,13 +396,21 @@ class InternVLAN1Agent(Agent):
                 if self.s2_output.output_action == []:
                     self.s2_output.output_action = None
             if output['action'][0] == 5:
+                # System 2 issued a LOOK_DOWN token.
+                # We execute this as a real env action so that the
+                # simulator generates a down-looking image. On the *next*
+                # step(), the `look_down` flag will force System 2 to
+                # perform pixel-goal prediction using that down-looking
+                # observation. We trust the learned S1 plan to decide
+                # how/when to restore camera pitch (via its own 4/5 actions).
                 self.look_down = True
-                # Clear action list when looking down
+                # Clear any remaining S2 outputs so that the next step
+                # starts from a clean slate.
                 with self.s2_output_lock:
                     self.s2_output.output_action = None
                     self.s2_output.output_pixel = None
                     self.s2_output.output_latent = None
-                output['action'] = [-1]
+                output['action'] = [5]
                 self.sys1_infer_times = 0
             else:
                 self.look_down = False
