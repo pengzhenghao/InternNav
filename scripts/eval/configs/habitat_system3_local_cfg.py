@@ -41,7 +41,7 @@ eval_cfg = EvalCfg(
         "output_path": "./logs/habitat/test_system3_local",
         "save_video": True,
         "epoch": 0,
-        "max_steps_per_episode": 500,
+        "max_steps_per_episode": 100,
         "port": "2334",
         "dist_url": "env://",
     },
