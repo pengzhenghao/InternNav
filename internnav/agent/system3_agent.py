@@ -1,5 +1,6 @@
 import os
 import logging
+import torch
 import requests
 import json
 import time
@@ -612,6 +613,92 @@ class System3Agent(InternVLAN1Agent):
         self.last_sys3_thought = None
         self.last_sys3_updated_step = None
 
+    def update_instruction(self, obs: List[Dict[str, Any]]):
+        """
+        Call System 3 (VLM) to update the instruction.
+        Returns: (instruction, status, thought)
+        """
+        logger.info(f"[Sys3] Update instruction. Sys2 calls: {self.sys2_call_count}. Sys3 calls: {self.sys3_call_count}.")
+        if not isinstance(obs, list):
+            obs = [obs]
+        current_obs = obs[0]
+        rgb = current_obs['rgb']
+        image = Image.fromarray(rgb.astype('uint8'), 'RGB')
+        img_b64 = pil_to_base64(image)
+        
+        self.subepisode_frames_b64.append(img_b64)
+        if len(self.subepisode_frames_b64) > self.max_subepisode_frames:
+            self.subepisode_frames_b64 = self.subepisode_frames_b64[-self.max_subepisode_frames:]
+            
+        assert self.navigator
+        
+        interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
+        should_call_sys3 = self.force_sys3_next or interval_ok or self.episode_step == 0
+        
+        if should_call_sys3:
+            self.sys3_call_count += 1
+            plan = self.navigator.plan_next_step(
+                img_b64,
+                sys1_steps=self.episode_step,
+                sys2_calls=self.sys2_call_count,
+                sys3_calls=self.sys3_call_count,
+                current_instruction=self.current_instruction,
+                subepisode_id=self.subepisode_id,
+                history_imgs=self.subepisode_frames_b64,
+            )
+            self.last_sys3_step = self.episode_step
+            self.force_sys3_next = False
+            
+            if plan:
+                status = plan.get("status")
+                change_instruction = plan.get("change_instruction", True)
+                new_instruction = plan.get("instruction")
+                discrete_actions = plan.get("discrete_actions", [])
+                
+                self.last_sys3_status = status
+                self.last_sys3_thought = plan.get("thought")
+                self.last_sys3_updated_step = self.episode_step
+                
+                if status == "DONE":
+                    return None, "DONE", plan.get("thought")
+                
+                if change_instruction and new_instruction:
+                    if new_instruction != self.current_instruction:
+                        # Reset Sys2 state
+                        if hasattr(self, "reset_sys2_state"):
+                            self.reset_sys2_state()
+                        
+                        self.current_instruction = new_instruction
+                        self.subepisode_id += 1
+                        self.subepisode_frames_b64 = [img_b64] # Start new sub-episode
+                        
+        return self.current_instruction, self.last_sys3_status, self.last_sys3_thought
+
+    def predict_goal(self, inputs):
+        """
+        Call System 2 to predict the goal.
+        Args:
+            inputs: Dict of inputs (pixel_values, etc.) prepared by processor
+        Returns:
+            output_ids
+        """
+        model = self.policy.model
+        with torch.no_grad():
+             output_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False, top_k=None, top_p=None, temperature=None)
+        return output_ids
+
+    def generate_local_actions(self, output_ids, pixel_values, image_grid_thw, images_dp, depths_dp):
+        """
+        Call System 1 to generate local actions.
+        """
+        model = self.policy.model
+        with torch.no_grad():
+            traj_latents = model.generate_latents(output_ids, pixel_values, image_grid_thw)
+            dp_actions = model.generate_traj(
+                traj_latents, images_dp, depths_dp, use_async=True
+            )
+        return dp_actions
+
     def set_goal(self, goal: str):
         """Initialize VLM Navigator with the high-level goal"""
         self.navigator = VLMNavigator(
@@ -799,17 +886,22 @@ class System3Agent(InternVLAN1Agent):
                     # - System 2 discrete STOP (meaning S2 thinks the *local instruction* is complete)
                     # - System 1 trajectory padding / end-of-local-plan (NOT S2 completion)
                     #
-                    # The classic dual-system evaluator treats System 1 STOP as
-                    # "replan/recover", not as "System 2 finished". We mirror that here.
+                    # The classic dual-system evaluator treats STOP from either source as
+                    # "replan/recover" (it takes a small recovery turn and clears the plan),
+                    # not as "end the Habitat episode". We mirror that here.
                     if source == "sys2_discrete" or source is None:
                         logger.info(
-                            "[Sys3] Intercepting System 2 STOP action (0) as sub-episode completion; "
-                            "converting to NO-OP (-1). Full episode termination is controlled by System 3."
+                            "[Sys3] Intercepting System 2 STOP action (0) as local-plan completion; "
+                            "converting to recovery TURN_LEFT (2) and forcing replan. "
+                            "Full episode termination is controlled by System 3."
                         )
-                        ret[0]['action'][0] = -1
+                        # Match the legacy evaluator: take a small recovery action instead of
+                        # stalling in place (NO-OP would change the trajectory distribution).
+                        ret[0]['action'][0] = 2
                         ret[0]['ideal_flag'] = False
                         # Mark that System 2 has finished its current local plan so that
-                        # System 3 is forced to compute a new instruction on the next step.
+                        # System 3 is forced to compute a new instruction on the next step
+                        # (it may choose to keep the same instruction).
                         self.force_sys3_next = True
 
                         # Reset low-level state so the next step forces fresh S2 inference.

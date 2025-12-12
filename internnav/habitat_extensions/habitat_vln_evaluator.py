@@ -136,6 +136,14 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             # Ensure agent is on the correct device
             if hasattr(self.agent, 'to'):
                 self.agent.to(self.device)
+            
+            if self.model_args.mode == 'system3':
+                # Map self.model to agent's model for evaluator access if needed
+                if hasattr(self.agent, 'policy') and hasattr(self.agent.policy, 'model'):
+                     self.model = self.agent.policy.model
+                # Load processor as it is needed for prompt construction
+                self.processor = AutoProcessor.from_pretrained(self.model_args.model_path)
+                self.processor.tokenizer.padding_side = 'left'
 
         # refactor: this part used in three places
         prompt = "You are an autonomous navigation assistant. Your task is to <instruction>. Where should you go next to stay on track? Please output the next waypoint\'s coordinates in the image. Please output STOP when you have successfully completed the task."
@@ -352,231 +360,6 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 # print("debug: done", done)
                 # print("debug: max_steps_per_episode", self.max_steps_per_episode)
 
-                # Standard Agent Interface Branch
-                if hasattr(self, 'agent') and self.agent is not None:
-                    def _make_agent_obs_input(obs):
-                        return {
-                            'rgb': obs['rgb'],
-                            'depth': obs['depth'],
-                            'instruction': episode_instruction,
-                            'gps': obs.get('gps'),
-                            'compass': obs.get('compass'),
-                        }
-
-                    def _append_vis_frame(obs):
-                        if not self.save_video:
-                            return
-
-                        info = self.env.get_metrics()
-                        # Base Habitat visualization frame (RGB + top-down overlays if enabled)
-                        frame = observations_to_image({'rgb': obs['rgb']}, info)
-
-                        # Add a right-side white panel for text (GLOBAL/LOCAL/System state/Thought)
-                        try:
-                            h, w = frame.shape[:2]
-                            panel_w = max(520, int(w * 0.55))
-                            canvas = np.full((h, w + panel_w, 3), 255, dtype=np.uint8)
-                            canvas[:, :w] = frame
-
-                            pil_img = Image.fromarray(canvas)
-                            draw = ImageDraw.Draw(pil_img)
-
-                            # Font setup (cache on self to avoid re-loading each frame)
-                            font_size = 20
-                            if not hasattr(self, "_overlay_font"):
-                                try:
-                                    self._overlay_font = ImageFont.truetype(
-                                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size
-                                    )
-                                except Exception:
-                                    self._overlay_font = ImageFont.load_default()
-                            font = self._overlay_font
-
-                            text_color = (0, 0, 0)
-                            stroke_fill = None
-
-                            # Estimate wrap width for the side panel
-                            approx_char_w = max(8, int(font_size * 0.55))
-                            wrap_w = max(28, int((panel_w - 20) / approx_char_w))
-
-                            def _wrap_block(label: str, text: str) -> str:
-                                if not text:
-                                    return f"{label}:"
-                                wrapped = textwrap.fill(str(text), width=wrap_w)
-                                lines = wrapped.split("\n")
-                                out = [f"{label}: {lines[0]}"]
-                                out += [f"  {ln}" for ln in lines[1:]]
-                                return "\n".join(out)
-
-                            # GLOBAL / LOCAL
-                            global_block = _wrap_block("GLOBAL", episode_instruction)
-                            local_text = ""
-                            if hasattr(self.agent, "current_instruction") and self.agent.current_instruction:
-                                local_text = str(self.agent.current_instruction)
-                            local_block = _wrap_block("LOCAL", local_text) if local_text else "LOCAL:"
-
-                            # System / navigation status
-                            sys_lines = []
-                            # Prefer agent-provided counters if available (System3Agent)
-                            if hasattr(self.agent, "episode_step"):
-                                sys_lines.append(f"sys1_steps={getattr(self.agent, 'episode_step')}")
-                            if hasattr(self.agent, "sys2_call_count"):
-                                sys_lines.append(f"sys2_calls={getattr(self.agent, 'sys2_call_count')}")
-                            if hasattr(self.agent, "sys3_call_count"):
-                                sys_lines.append(f"sys3_calls={getattr(self.agent, 'sys3_call_count')}")
-                            if hasattr(self.agent, "subepisode_id"):
-                                sys_lines.append(f"subep={getattr(self.agent, 'subepisode_id')}")
-                            sys_lines.append(f"eval_step={step_id}")
-
-                            nav_status = getattr(self.agent, "last_sys3_status", None) if hasattr(self.agent, "last_sys3_status") else None
-                            nav_status_line = f"NAV_STATUS={nav_status}" if nav_status else ""
-                            if hasattr(self.agent, "last_sys3_updated_step") and getattr(self.agent, "last_sys3_updated_step") is not None:
-                                nav_status_line = (nav_status_line + " " if nav_status_line else "") + f"(updated@{getattr(self.agent, 'last_sys3_updated_step')})"
-
-                            # Agent overlay summary line (S2 action/pixel goal)
-                            agent_state_line = ""
-                            if hasattr(self.agent, "get_overlay_state_line"):
-                                try:
-                                    agent_state_line = self.agent.get_overlay_state_line(info)
-                                except Exception as e:
-                                    logger.warning(f"Agent overlay state failed: {e}")
-
-                            # Env metrics
-                            env_parts = []
-                            if "success" in info:
-                                try:
-                                    env_parts.append(f"success={float(info['success']):.2f}")
-                                except Exception:
-                                    env_parts.append(f"success={info['success']}")
-                            if "distance_to_goal" in info:
-                                try:
-                                    env_parts.append(f"ne={float(info['distance_to_goal']):.2f}")
-                                except Exception:
-                                    env_parts.append(f"ne={info['distance_to_goal']}")
-                            env_line = "ENV: " + " ".join(env_parts) if env_parts else ""
-
-                            sys_block = "SYS: " + " | ".join([s for s in sys_lines if s])
-                            if nav_status_line:
-                                sys_block += "\n" + "STATUS: " + nav_status_line
-                            if agent_state_line:
-                                sys_block += "\n" + "S2: " + agent_state_line
-                            if env_line:
-                                sys_block += "\n" + env_line
-
-                            # System 3 thought (may be long): wrap + truncate to keep panel readable
-                            thought_text = ""
-                            if hasattr(self.agent, "last_sys3_thought") and getattr(self.agent, "last_sys3_thought"):
-                                thought_text = str(getattr(self.agent, "last_sys3_thought"))
-                            if thought_text:
-                                # keep the most recent tail; it tends to contain final decision
-                                max_chars = 1400
-                                if len(thought_text) > max_chars:
-                                    thought_text = "… " + thought_text[-max_chars:]
-                                thought_block = _wrap_block("THOUGHT", thought_text)
-                            else:
-                                thought_block = "THOUGHT:"
-
-                            combined_text = "\n\n".join([global_block, local_block, sys_block, thought_block])
-
-                            # S2 pixel information (if available on the agent): draw directly on the RGB frame
-                            if hasattr(self.agent, "last_s2_pixel") and getattr(self.agent, "last_s2_pixel") is not None:
-                                pixel = self.agent.last_s2_pixel
-                                # pixel is [row, col] => (y, x)
-                                y, x = int(pixel[0]), int(pixel[1])
-                                width, height = pil_img.size
-                                # Clamp to image bounds
-                                x = max(0, min(width - 1, x))
-                                y = max(0, min(height - 1, y))
-                                r = 5
-                                draw.ellipse(
-                                    (x - r, y - r, x + r, y + r),
-                                    fill=(255, 0, 0),
-                                    outline=(0, 0, 0),
-                                    width=2,
-                                )
-                            # Draw text into the white panel
-                            text_x = w + 10
-                            text_y = 10
-                            draw.text((text_x, text_y), combined_text, font=font, fill=text_color)
-
-                            frame = np.array(pil_img)
-                        except Exception as e:
-                            logger.warning(f"Failed to draw text overlay: {e}")
-
-                        vis_frames.append(frame)
-
-                    # Agent expects list, returns list
-                    agent_outputs = self.agent.step([_make_agent_obs_input(observations)])
-                    agent_output = agent_outputs[0]
-                    action = agent_output['action'][0]
-                    
-                    _append_vis_frame(observations)
-
-                    # Habitat-specific camera-tilt protocol kept in evaluator.
-                    #
-                    # If the agent emits LOOK_DOWN (5), we:
-                    #   1) env.step(5), env.step(5) -> obtain down-looking observation
-                    #   2) feed that down-looking observation back into the agent once
-                    #      (twice if it returns internal NO-OP -1) so it can produce
-                    #      the next "real" navigation action
-                    #   3) env.step(4), env.step(4) -> restore pitch to horizontal
-                    #   4) execute the next real action (if any)
-                    #
-                    # This matches the dual-system evaluator behavior while keeping the
-                    # agent environment-agnostic.
-                    if action == -1:
-                        # Internal NO-OP used by some agents to advance their own state.
-                        # Do not step the environment.
-                        pass
-                    else:
-                        tilt_cycles = 0
-                        while (not done) and action == 5 and tilt_cycles < 4:
-                            # 1) Two look-down steps to get the down-looking frame.
-                            for _ in range(2):
-                                observations, _, done, _ = self.env.step(5)
-                                if done:
-                                    break
-                            if done:
-                                break
-
-                            down_obs = observations
-
-                            # 2) Let agent consume the down-looking observation to
-                            #    compute the next action. Some agents may emit an
-                            #    internal NO-OP (-1) first; call once more in that case.
-                            agent_output = self.agent.step([_make_agent_obs_input(down_obs)])[0]
-                            action = agent_output['action'][0]
-                            if action == -1:
-                                agent_output = self.agent.step([_make_agent_obs_input(down_obs)])[0]
-                                action = agent_output['action'][0]
-
-                            # Record the down-looking frame after S2 has produced the pixel-goal.
-                            _append_vis_frame(down_obs)
-
-                            # 3) Restore camera pitch back to horizontal.
-                            for _ in range(2):
-                                observations, _, done, _ = self.env.step(4)
-                                if done:
-                                    break
-                            tilt_cycles += 1
-
-                        # 4) Execute the (non-LOOK_DOWN) action, if any.
-                        if (not done) and action not in (-1, 5):
-                            observations, _, done, _ = self.env.step(action)
-
-                    if done and not done_by_env_flag:
-                        logger.info(
-                            "Episode termination: Habitat env returned done=True after agent action=%s at step_id=%d "
-                            "(max_steps_per_episode=%d).",
-                            action,
-                            step_id,
-                            self.max_steps_per_episode,
-                        )
-                        done_by_env_flag = True
-
-                    step_id += 1
-                    continue
-
                 # refactor agent get action
                 rgb = observations["rgb"]
                 depth = observations["depth"]
@@ -614,7 +397,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                     image = image.resize((self.model_args.resize_w, self.model_args.resize_h))
                     rgb_list.append(image)
 
-                    if self.model_args.mode == 'dual_system':
+                    if self.model_args.mode in ['dual_system', 'system3']:
                         down_observations, _, done, _ = self.env.step(5)
                         down_observations, _, done, _ = self.env.step(5)
 
@@ -638,8 +421,40 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
                 info = self.env.get_metrics()
 
+                # All pending discrete actions are gone and there might be last discrete action
+                # stored in 'action'.
                 if len(action_seq) == 0 and goal is None:
+                    if self.model_args.mode == 'system3':
+                        new_instr, status, thought = self.agent.update_instruction(observations)
+
+                        logger.info(
+                            f"System 3 output:\n"
+                            f"  Instruction: {new_instr}\n"
+                            f"  Status     : {status}\n"
+                            f"  Thought    : {thought}"
+                        )
+                        # FIXME: Just assume nothing happen for debug purpose.
+                        # if status == 'DONE':
+                        #     # Handle DONE: agent thinks we are done.
+                        #     # We need to break or set done=True?
+                        #     # The dual_system loop doesn't have a clean way to "just done" here except action=0?
+                        #     # If I set action=0 later, it might trigger done.
+                        #     # But here we are about to generate a goal.
+                        #     # If done, we shouldn't generate goal.
+                        #     pass
+
+                        #     # TOOD: trigger episode done pipeline.
+
+                        # if new_instr and new_instr != episode_instruction:
+                        #     logger.info(f"System 3 update instruction: {new_instr}")
+                        #     episode_instruction = new_instr
+                        #     # TODO: trigger reset pipeline.
+
+                    logger.info("Instruction: %s", episode.instruction.instruction_text)
+
                     if action != 5:
+                        # Call system 2 again because it doesn't want to 
+                        # generate pixel goal yet.
                         sources = copy.deepcopy(self.conversation)
                         sources[0]["value"] = sources[0]["value"].replace(
                             '<instruction>.', episode.instruction.instruction_text[:-1]
@@ -689,8 +504,11 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
                     inputs = self.processor(text=[text], images=input_images, return_tensors="pt").to(self.model.device)
 
-                    with torch.no_grad():
-                        output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False, top_k=None, top_p=None, temperature=None)
+                    if self.model_args.mode == 'system3':
+                        output_ids = self.agent.predict_goal(inputs)
+                    else:
+                        with torch.no_grad():
+                            output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False, top_k=None, top_p=None, temperature=None)
 
                     llm_outputs = self.processor.tokenizer.decode(
                         output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
@@ -733,9 +551,6 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             pixel_values = inputs.pixel_values
                             image_grid_thw = torch.cat([thw.unsqueeze(0) for thw in inputs.image_grid_thw], dim=0)
 
-                            with torch.no_grad():
-                                traj_latents = self.model.generate_latents(output_ids, pixel_values, image_grid_thw)
-
                             # prepocess align with navdp
                             image_dp = (
                                 torch.tensor(np.array(look_down_image.resize((224, 224)))).to(torch.bfloat16) / 255
@@ -746,10 +561,18 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             pix_goal_depth = copy.copy(depth_dp)
                             depths_dp = torch.stack([pix_goal_depth, depth_dp]).unsqueeze(0).to(self.device)
 
-                            with torch.no_grad():
-                                dp_actions = self.model.generate_traj(
-                                    traj_latents, images_dp, depths_dp, use_async=True
+                            if self.model_args.mode == 'system3':
+                                dp_actions = self.agent.generate_local_actions(
+                                    output_ids, pixel_values, image_grid_thw, images_dp, depths_dp
                                 )
+                            else:
+                                with torch.no_grad():
+                                    traj_latents = self.model.generate_latents(output_ids, pixel_values, image_grid_thw)
+
+                                with torch.no_grad():
+                                    dp_actions = self.model.generate_traj(
+                                        traj_latents, images_dp, depths_dp, use_async=True
+                                    )
 
                             random_choice = np.random.choice(dp_actions.shape[0])
                             if self.model_args.continuous_traj:
@@ -799,10 +622,16 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             depth_dp = look_down_depth.unsqueeze(-1).to(torch.bfloat16)
 
                             depths_dp = torch.stack([pix_goal_depth, depth_dp]).unsqueeze(0).to(self.device)
-                            with torch.no_grad():
-                                dp_actions = self.model.generate_traj(
-                                    traj_latents, images_dp, depths_dp, use_async=True
+                            
+                            if self.model_args.mode == 'system3':
+                                dp_actions = self.agent.generate_local_actions(
+                                    output_ids, pixel_values, image_grid_thw, images_dp, depths_dp
                                 )
+                            else:
+                                with torch.no_grad():
+                                    dp_actions = self.model.generate_traj(
+                                        traj_latents, images_dp, depths_dp, use_async=True
+                                    )
 
                             random_choice = np.random.choice(dp_actions.shape[0])
                             if self.model_args.continuous_traj:

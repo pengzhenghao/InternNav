@@ -27,7 +27,7 @@ eval_cfg = EvalCfg(
             "predict_step_nums": 32,
             "continuous_traj": True,
             "max_new_tokens": 1024,
-            "vis_debug": True, # InternVLAN1Agent needs this
+            "vis_debug": False, # InternVLAN1Agent needs this
         },
     ),
     env=EnvCfg(
