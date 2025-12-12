@@ -1,5 +1,6 @@
 import copy
 import itertools
+import logging
 import re
 from collections import OrderedDict
 from typing import Union
@@ -10,17 +11,10 @@ from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel
 
 from internnav.configs.model.base_encoders import ModelCfg
-from internnav.model.basemodel.internvla_n1.internvla_n1 import (
-    InternVLAN1ForCausalLM,
-    InternVLAN1ModelConfig,
-)
-from internnav.model.utils.vln_utils import (
-    S1Output,
-    S2Output,
-    chunk_token,
-    split_and_clean,
-    traj_to_actions,
-)
+from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM, InternVLAN1ModelConfig
+from internnav.model.utils.vln_utils import S1Output, S2Output, chunk_token, split_and_clean, traj_to_actions
+
+logger = logging.getLogger(__name__)
 
 
 class InternVLAN1Net(PreTrainedModel):
@@ -196,6 +190,14 @@ class InternVLAN1Net(PreTrainedModel):
 
         else:  # Output action
             action_seq = self.parse_actions(self.llm_output)
+            # If the model emits an empty / unparseable action sequence, default to STOP
+            # and log the raw output for debugging.
+            if len(action_seq) == 0:
+                logger.warning(f"[S2] Unparseable LLM action output: {self.llm_output!r} (look_down={look_down})")
+                action_seq = [0]
+            # Log frequent STOPs to help diagnose “stuck” behavior.
+            if action_seq == [0]:
+                logger.info(f"[S2] LLM returned STOP: {self.llm_output!r} (look_down={look_down})")
             output.output_action = action_seq
 
         return output
@@ -208,11 +210,16 @@ class InternVLAN1Net(PreTrainedModel):
 
         if self.continuous_traj:
             action_list = traj_to_actions(dp_actions)
+            if len(action_list) < 8:
+                action_list += [0] * (8 - len(action_list))
         else:
             random_choice = np.random.choice(dp_actions.shape[0])
             action_list = chunk_token(dp_actions[random_choice])
 
-        action_list = [x for x in action_list if x != 0]
+        # NOTE: Do NOT filter out zeros here. `0` is STOP and is meaningful.
+        infer_mode = getattr(self.model_config, "infer_mode", "sync")
+        use_async = infer_mode == "partial_async"
 
-        output = S1Output(idx=action_list[:4])
-        return output
+        # If async, System1 returns a short horizon; otherwise return the full planned horizon.
+        horizon = 4 if use_async else 8
+        return S1Output(idx=action_list[:horizon])

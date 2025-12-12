@@ -91,6 +91,14 @@ class InternVLAN1Agent(Agent):
         self.last_s2_idx = None
         self.last_discrete_action = None
 
+        # Provenance for any queued discrete actions stored in `self.s2_output.output_action`.
+        # This queue can be produced by:
+        # - System 2 discrete actions (LLM action sequence), or
+        # - System 1 trajectory remainder (after executing the first action).
+        #
+        # Values: {"sys2", "sys1", None}
+        self._queued_action_source = None
+
         # Thread management
         self.s2_thread = None
 
@@ -129,6 +137,7 @@ class InternVLAN1Agent(Agent):
             self.s2_input = S2Input()
         with self.s2_output_lock:
             self.s2_output = S2Output()
+        self._queued_action_source = None
         self.s1_output = S1Output()
 
         # for async dual sys
@@ -171,6 +180,7 @@ class InternVLAN1Agent(Agent):
             self.s2_input = S2Input()
         with self.s2_output_lock:
             self.s2_output = S2Output()
+        self._queued_action_source = None
 
         # Clear cached visualization info
         self.last_s2_pixel = None
@@ -230,8 +240,11 @@ class InternVLAN1Agent(Agent):
                         )
                 except Exception as e:
                     logger.error(f"[Sys2] s2 infer error: {e}")
-                    self.s2_output.is_infering = False
-                    self.policy.reset()
+                    # Mark inference as finished to avoid blocking the main thread.
+                    with self.s2_output_lock:
+                        self.s2_output.is_infering = False
+                    with self.s2_agent_lock:
+                        self.policy.reset()
 
                     # Fallback: retry without look_down flag if the first attempt fails
                     try:
@@ -245,11 +258,17 @@ class InternVLAN1Agent(Agent):
                         )
                     except Exception as e:
                         logger.error(f"[Sys2] s2 infer error (fallback): {e}")
-                        self.s2_output.is_infering = False
-                        self.policy.reset()
-                        self.s2_output.output_pixel = None
-                        self.s2_output.output_action = [0]  # finish the inference
-                        self.s2_output.output_latent = None
+                        # Hard fallback: publish a valid S2Output so the main thread
+                        # won't hang on validate(). Use a STOP token as a safe default.
+                        with self.s2_output_lock:
+                            self.s2_output.is_infering = False
+                            self.s2_output.idx = s2_infer_idx
+                            self.s2_output.output_pixel = None
+                            self.s2_output.output_action = [0]  # finish the inference
+                            self.s2_output.output_latent = None
+                            self._queued_action_source = "sys2"
+                        with self.s2_agent_lock:
+                            self.policy.reset()
                         continue
 
                 # print("s2 infer finish!!")
@@ -265,6 +284,10 @@ class InternVLAN1Agent(Agent):
                     self.s2_output.rgb_memory = self.s2_input.rgb
                     self.s2_output.depth_memory = self.s2_input.depth
                     self.s2_output.is_infering = False
+                    if self.s2_output.output_action is not None:
+                        self._queued_action_source = "sys2"
+                    else:
+                        self._queued_action_source = None
 
                     
                 # Beautiful log for S2 output
@@ -302,9 +325,20 @@ class InternVLAN1Agent(Agent):
 
         # 1. Synchronous mode: infer S2 every frame to provide to S1 for execution
         if mode == "sync":
+            # Force S2 re-inference if we've exceeded the max steps for the current latent (System 2 goal)
+            if self.dual_forward_step >= self.sys2_max_forward_step:
+                return True
+
             if self.s2_output.output_action is None:
+                # No actions in queue.
+                # If we have a latent, we can refresh S1 (re-plan with same latent, new image).
+                # So we return False to skip S2 inference and fall through to S1 execution.
+                if self.s2_output.output_latent is not None:
+                    return False
+                # No actions and no latent -> Initial state or reset -> Infer S2.
                 return True
             else:
+                # We have actions to execute -> Do not infer S2.
                 return False
         # 2. Partial async mode: S2 infers 1 frame while S1 executes multi frames
         if mode == "partial_async":
@@ -372,10 +406,57 @@ class InternVLAN1Agent(Agent):
             # Even if this frame doesn't do s2 inference, rgb needs to be provided to ensure history is correct
             self.policy.step_no_infer(rgb, depth, pose)
         # S1 inference is done in the main thread
+        # Wait for S2 thread to publish a valid output. Never hang forever:
+        # if S2 crashes, we force a safe default output and continue.
+        t0 = time.time()
+        max_wait_s = 120.0
         while self.s2_output.is_infering:
+            if time.time() - t0 > max_wait_s:
+                logger.error(
+                    "[Sys2] Timeout waiting for inference to finish (%.1fs). "
+                    "Forcing safe default output to avoid hang. "
+                    "state: idx=%s action=%s pixel=%s latent=%s is_infering=%s",
+                    max_wait_s,
+                    getattr(self.s2_output, "idx", None),
+                    getattr(self.s2_output, "output_action", None),
+                    getattr(self.s2_output, "output_pixel", None),
+                    None if getattr(self.s2_output, "output_latent", None) is None else "Tensor",
+                    getattr(self.s2_output, "is_infering", None),
+                )
+                with self.s2_output_lock:
+                    self.s2_output.is_infering = False
+                    self.s2_output.idx = max(getattr(self.s2_output, "idx", -1), self.episode_step)
+                    if (
+                        self.s2_output.output_action is None
+                        and self.s2_output.output_pixel is None
+                        and self.s2_output.output_latent is None
+                    ):
+                        self.s2_output.output_action = [0]
+                break
             time.sleep(0.2)
 
         while not self.s2_output.validate():
+            if time.time() - t0 > max_wait_s:
+                logger.error(
+                    "[Sys2] Timeout waiting for valid S2Output (%.1fs). "
+                    "Forcing safe default output to avoid hang. "
+                    "state: idx=%s action=%s pixel=%s latent=%s is_infering=%s",
+                    max_wait_s,
+                    getattr(self.s2_output, "idx", None),
+                    getattr(self.s2_output, "output_action", None),
+                    getattr(self.s2_output, "output_pixel", None),
+                    None if getattr(self.s2_output, "output_latent", None) is None else "Tensor",
+                    getattr(self.s2_output, "is_infering", None),
+                )
+                with self.s2_output_lock:
+                    self.s2_output.idx = max(getattr(self.s2_output, "idx", -1), self.episode_step)
+                    if (
+                        self.s2_output.output_action is None
+                        and self.s2_output.output_pixel is None
+                        and self.s2_output.output_latent is None
+                    ):
+                        self.s2_output.output_action = [0]
+                break
             time.sleep(0.2)
 
         # Per-step visualization state defaults
@@ -384,11 +465,14 @@ class InternVLAN1Agent(Agent):
         self.last_discrete_action = None
 
         output = {}
+        action_source = "unknown"
         # Simple branch:
         # 1. If S2 output is full discrete actions, don't execute S1 and return directly
         # print('===============', self.s2_output.output_action, '=================')
 
+
         if self.s2_output.output_action is not None:
+            action_source = "sys2_discrete"
             output['action'] = [self.s2_output.output_action[0]]
 
             with self.s2_output_lock:
@@ -418,9 +502,11 @@ class InternVLAN1Agent(Agent):
                     self.dual_forward_step += 1
 
         else:
+
             self.look_down = False
             # 2. If output is in latent form, execute latent S1
             if self.s2_output.output_latent is not None:
+                action_source = "sys1_traj"
                 self.output_pixel = copy.deepcopy(self.s2_output.output_pixel)
                 # Cache for external visualization (e.g., evaluator video overlay)
                 self.last_s2_pixel = copy.deepcopy(self.s2_output.output_pixel)
@@ -461,18 +547,26 @@ class InternVLAN1Agent(Agent):
                 assert False, f"S2 output should be either action or latent, but got neither!  {self.s2_output}"
 
             if self.s1_output.idx == []:
+                action_source = "internal_noop"
                 output['action'] = [-1]
             else:
-                output['action'] = [self.s1_output.idx[0]]
-            with self.s2_output_lock:
-                if len(self.s1_output.idx) > 1:
-                    self.s2_output.output_action = self.s1_output.idx[1:]
-                    if self.s2_output.output_action == []:
-                        self.s2_output.output_action = None
-                else:
-                    self.s2_output.output_action = None
+                # Align with evaluator: only take `sys1_forward_step` (4) actions from the generated trajectory.
+                # This ensures we refresh S1 planning periodically (every 4 steps) using new visual observations
+                # even while keeping the same S2 latent.
 
-                self.s2_output.output_pixel = None  # TODO: now just for visulization
+                full_actions = self.s1_output.idx
+                if len(full_actions) > self.sys1_forward_step:
+                    full_actions = full_actions[:self.sys1_forward_step]
+                
+                output['action'] = [full_actions[0]]
+                
+                with self.s2_output_lock:
+                    if len(full_actions) > 1:
+                        self.s2_output.output_action = full_actions[1:]
+                    else:
+                        self.s2_output.output_action = None
+
+                    self.s2_output.output_pixel = None  # TODO: now just for visulization
                 if mode == 'sync':
                     self.s2_output.output_latent = None
                 else:
@@ -538,7 +632,7 @@ class InternVLAN1Agent(Agent):
                     "[Sys1/Sys2] Emitting internal NO-OP / look-down sync action (-1) at episode_step=%d.",
                     self.episode_step,
                 )
-            return [{'action': output['action'], 'ideal_flag': True}]
+            return [{'action': output['action'], 'ideal_flag': True, 'action_source': action_source}]
         elif 'velocity' in output:
             logger.info(
                 "[Sys1/Sys2] Emitting continuous control velocity to environment at episode_step=%d.",

@@ -155,15 +155,17 @@ Strategic Guidelines:
 2. Verify Targets: Ensure the target you are heading towards is actually the correct one. If the goal is "door" but you are facing a staircase, check your surroundings first.
 3. Reflect on Progress: In your "thought", explicitly evaluate if your previous actions brought you closer to the high-level goal. If not, adjust your strategy (e.g., from moving to searching).
 4. Subgoals & Phrasing: Break the user goal into immediate, concrete subgoals. Use these as the instruction for System 2. IMPORTANT: Avoid complex spatial constraints like "keeping X on your left". System 2 often interprets "left" or "right" in such phrases as immediate turn commands. Instead, specify the target or direction directly (e.g., "Walk forward past the table", "Go to the white door").
-5. Verification Stage: When you believe you have reached the goal, DO NOT immediately output DONE. Instead, switch to "VERIFICATION" status and look around to confirm the goal is truly achieved. During VERIFICATION, carefully check (based on the visuals) that you are actually at the correct target and are within roughly 3 meters of it. Only output DONE after this verification passes.
-6. Instruction Style (System 2 friendly): Write instructions in a rule-based navigation style similar to R2R instructions, e.g., "Exit the bedroom and turn left. Walk straight passing the gray couch and stop near the rug." Prefer short imperative sentences that mention actions and concrete landmarks: "Exit the room and turn right.", "Walk straight past the table and stop near the chair." Avoid chatty language, self-references, or references to System 2/3; only describe what the robot should do.
+5. Anti-Premature Success (critical): It is very unlikely that you are already at the destination at the very beginning, or after only rotating in place without translating. You MUST NOT enter VERIFICATION/DONE unless you have strong positive visual evidence of the goal AND evidence that you are physically close (roughly within 3 meters). If you have not passed any clear milestones or have not made meaningful forward progress, assume you are NOT there yet and continue SEARCHING/NAVIGATING.
+6. Termination Condition First (critical): Before entering VERIFICATION, explicitly state in your "thought" a concrete termination condition for THIS goal: what visual cues must be true (e.g., "I am under the arch; the arch frame surrounds/overheads me", "I am beside the red door; it fills much of the view") and what proximity evidence you will use for the ~3m rule. Then in VERIFICATION, actively check those cues. If the cues are not satisfied, do NOT output DONE—issue the next corrective instruction to satisfy them (often: move closer, pass through/into the region, or adjust viewpoint).
+7. Verification Stage (efficient): When you believe you have reached the goal, DO NOT immediately output DONE. Switch to "VERIFICATION" status and perform a targeted check. You do NOT have to do a full 360° rotation every time—rotate only as much as needed to confirm the goal and proximity, and prefer moving slightly closer or changing viewpoint to disambiguate.
+8. Instruction Style (System 2 friendly): Write instructions in a rule-based navigation style similar to R2R instructions, e.g., "Exit the bedroom and turn left. Walk straight passing the gray couch and stop near the rug." Prefer short imperative sentences that mention actions and concrete landmarks: "Exit the room and turn right.", "Walk straight past the table and stop near the chair." Avoid chatty language, self-references, or references to System 2/3; only describe what the robot should do.
 
 Your Loop:
 1. Analyze the current image.
 2. Determine if the goal is reached (success once within 3 meters).
 3. Reflect on current progress and validity of the previous plan.
-4. If you think you have arrived, trigger "VERIFICATION" status and issue instructions to look around (e.g., "Turn 360 degrees to verify context") to make sure the goal is really achieved.
-5. If in "VERIFICATION" status and you confirm the goal is achieved AND you are within roughly 3 meters of the target, output "DONE". Otherwise, continue NAVIGATING or SEARCHING.
+4. If you think you have arrived, first state a goal-specific termination condition in your thought, then trigger "VERIFICATION" status and issue instructions to check it (targeted rotation / viewpoint change / small approach).
+5. If in "VERIFICATION" status and you confirm the termination condition is satisfied AND you are within roughly 3 meters of the target, output "DONE". Otherwise, continue NAVIGATING or SEARCHING.
 6. If not reached, plan the immediate next step (Search or Move) by selecting a specific subgoal.
 7. Output a navigation instruction for the local system using the provided tool.
 """
@@ -173,6 +175,7 @@ Your Loop:
         self,
         frames_b64: List[str],
         query: str = "What should I do next?",
+        sys1_steps: int = 0,
         sys2_calls: int = 0,
         sys3_calls: int = 0,
         current_instruction: Optional[str] = None,
@@ -201,6 +204,7 @@ Your Loop:
             {
                 "type": "text",
                 "text": (
+                    f"System 1 steps so far: {sys1_steps}. "
                     f"System 2 calls so far: {sys2_calls}. "
                     f"System 3 calls so far: {sys3_calls}."
                 ),
@@ -323,6 +327,7 @@ Your Loop:
         # Keep the user query minimal; rely on message history for context
         s2_calls = sys2_calls if sys2_calls is not None else 0
         s3_calls = sys3_calls if sys3_calls is not None else 0
+        s1_steps = sys1_steps if sys1_steps is not None else 0
         query = (
             "Please decide whether to KEEP the current navigation instruction or CHANGE it, "
             "and use the tool to output your decision."
@@ -340,6 +345,7 @@ Your Loop:
         user_msg = self.build_user_message(
             frames_b64,
             query=query,
+            sys1_steps=s1_steps,
             sys2_calls=s2_calls,
             sys3_calls=s3_calls,
             current_instruction=current_instruction,
@@ -565,6 +571,10 @@ class System3Agent(InternVLAN1Agent):
         self.prompt_dump_episode_id: Optional[int] = None
         self.sys3_call_count: int = 0
         self.sys2_call_count: int = 0
+        # Latest System 3 outputs for visualization/debugging
+        self.last_sys3_status: Optional[str] = None
+        self.last_sys3_thought: Optional[str] = None
+        self.last_sys3_updated_step: Optional[int] = None
         # Throttle System3 invocations to avoid over-calling VLM.
         # Defaults: allow a new Sys3 call every 2 macro steps.
         self.sys3_interval_steps: int = config.model_settings.get("sys3_interval_steps", 8)
@@ -598,6 +608,9 @@ class System3Agent(InternVLAN1Agent):
         self.force_sys3_next = False
         self.sys3_call_count = 0
         self.sys2_call_count = 0
+        self.last_sys3_status = None
+        self.last_sys3_thought = None
+        self.last_sys3_updated_step = None
 
     def set_goal(self, goal: str):
         """Initialize VLM Navigator with the high-level goal"""
@@ -680,6 +693,10 @@ class System3Agent(InternVLAN1Agent):
                 change_instruction = plan.get("change_instruction", True)
                 new_instruction = plan.get("instruction")
                 discrete_actions = plan.get("discrete_actions", [])
+                # Cache System 3 reasoning for visualization/debugging
+                self.last_sys3_status = status
+                self.last_sys3_thought = plan.get("thought")
+                self.last_sys3_updated_step = self.episode_step
 
                 if status == "DONE":
                     logger.info(
@@ -728,11 +745,11 @@ class System3Agent(InternVLAN1Agent):
                         # episode / System 3 state intact.
                         
                         
-                        # if hasattr(self, "reset_sys2_state"):
-                        #     try:
-                        #         self.reset_sys2_state()
-                        #     except Exception as e:
-                        #         logger.warning(f"[Sys3] reset_sys2_state failed: {e}")
+                        if hasattr(self, "reset_sys2_state"):
+                            try:
+                                self.reset_sys2_state()
+                            except Exception as e:
+                                logger.warning(f"[Sys3] reset_sys2_state failed: {e}")
                         
                         
                         self.current_instruction = new_instruction
@@ -776,15 +793,48 @@ class System3Agent(InternVLAN1Agent):
             if isinstance(ret, list) and ret and 'action' in ret[0]:
                 act = ret[0]['action'][0] if ret[0]['action'] else None
                 if act == 0:
-                    logger.info(
-                        "[Sys3] Intercepting System 2 STOP action (0) as sub-episode completion; "
-                        "converting to NO-OP (-1). Full episode termination is controlled by System 3."
-                    )
-                    ret[0]['action'][0] = -1
-                    ret[0]['ideal_flag'] = False
-                    # Mark that System 2 has finished its current local plan so that
-                    # System 3 is forced to compute a new instruction on the next step.
-                    self.force_sys3_next = True
+                    source = ret[0].get("action_source", None)
+
+                    # IMPORTANT: In this codebase, action==0 can originate from:
+                    # - System 2 discrete STOP (meaning S2 thinks the *local instruction* is complete)
+                    # - System 1 trajectory padding / end-of-local-plan (NOT S2 completion)
+                    #
+                    # The classic dual-system evaluator treats System 1 STOP as
+                    # "replan/recover", not as "System 2 finished". We mirror that here.
+                    if source == "sys2_discrete" or source is None:
+                        logger.info(
+                            "[Sys3] Intercepting System 2 STOP action (0) as sub-episode completion; "
+                            "converting to NO-OP (-1). Full episode termination is controlled by System 3."
+                        )
+                        ret[0]['action'][0] = -1
+                        ret[0]['ideal_flag'] = False
+                        # Mark that System 2 has finished its current local plan so that
+                        # System 3 is forced to compute a new instruction on the next step.
+                        self.force_sys3_next = True
+
+                        # Reset low-level state so the next step forces fresh S2 inference.
+                        if hasattr(self, "reset_sys2_state"):
+                            try:
+                                self.reset_sys2_state()
+                            except Exception as e:
+                                logger.warning(f"[Sys3] reset_sys2_state on STOP failed: {e}")
+                    else:
+                        # System 1 STOP / padding => treat as local-plan finished or invalid.
+                        # Mirror dual-system evaluator behavior: clear low-level plan and
+                        # take a small recovery action (TURN_LEFT=2) instead of ending the sub-episode.
+                        logger.info(
+                            "[Sys3] System 1 produced STOP/padding (0) (source=%s); "
+                            "treating as replan trigger (not sub-episode completion). "
+                            "Converting to recovery TURN_LEFT (2).",
+                            source,
+                        )
+                        ret[0]['action'][0] = 2
+                        ret[0]['ideal_flag'] = False
+                        if hasattr(self, "reset_sys2_state"):
+                            try:
+                                self.reset_sys2_state()
+                            except Exception as e:
+                                logger.warning(f"[Sys3] reset_sys2_state on Sys1 STOP failed: {e}")
         except Exception as e:
             logger.warning(f"[Sys3] Failed to post-process System 2 action: {e}")
 
