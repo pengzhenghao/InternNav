@@ -163,13 +163,15 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         )
 
         # For agent-driven modes (e.g., System 3), we mimic the original
-        # dual-system behavior around LOOK_DOWN (5) and LOOK_UP (4):
-        #   - When the agent emits 5, we apply two env steps of 5 to obtain
-        #     a proper look-down image for pixel-goal prediction.
-        #   - Before executing the *next* non-5 action, we apply two env
-        #     steps of 4 to bring the camera back to horizontal.
-        # This state keeps track of how many LOOK_UP actions we still owe.
-        self._pending_look_up_steps: int = 0
+        # dual-system evaluator's camera-tilt protocol at the *evaluator/env*
+        # boundary (not inside the agent):
+        #
+        # - If the agent emits LOOK_DOWN (5), we execute: 5, 5, 4, 4
+        #   (two look-downs to get a proper down-looking view, then two
+        #   look-ups to restore the camera back to horizontal).
+        #
+        # This keeps the agent portable to other environments that don't
+        # require this Habitat-specific multi-step tilt behavior.
 
         self.objectnav_instructions = ["Search for the {target_object}."]
 
@@ -352,26 +354,31 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
                 # Standard Agent Interface Branch
                 if hasattr(self, 'agent') and self.agent is not None:
-                    current_obs_input = {
-                        'rgb': observations['rgb'],
-                        'depth': observations['depth'],
-                        'instruction': episode_instruction,
-                        'gps': observations.get('gps'),
-                        'compass': observations.get('compass')
-                    }
-                    # Agent expects list, returns list
-                    agent_outputs = self.agent.step([current_obs_input])
-                    agent_output = agent_outputs[0]
-                    action = agent_output['action'][0]
-                    
-                    if self.save_video:
+                    def _make_agent_obs_input(obs):
+                        return {
+                            'rgb': obs['rgb'],
+                            'depth': obs['depth'],
+                            'instruction': episode_instruction,
+                            'gps': obs.get('gps'),
+                            'compass': obs.get('compass'),
+                        }
+
+                    def _append_vis_frame(obs):
+                        if not self.save_video:
+                            return
+
                         info = self.env.get_metrics()
-                        # Just save the raw observation frame for now
-                        frame = observations_to_image({'rgb': observations['rgb']}, info)
-                        
-                        # Add instruction text overlay
+                        # Base Habitat visualization frame (RGB + top-down overlays if enabled)
+                        frame = observations_to_image({'rgb': obs['rgb']}, info)
+
+                        # Add a right-side white panel for text (GLOBAL/LOCAL/System state/Thought)
                         try:
-                            pil_img = Image.fromarray(frame)
+                            h, w = frame.shape[:2]
+                            panel_w = max(520, int(w * 0.55))
+                            canvas = np.full((h, w + panel_w, 3), 255, dtype=np.uint8)
+                            canvas[:, :w] = frame
+
+                            pil_img = Image.fromarray(canvas)
                             draw = ImageDraw.Draw(pil_img)
 
                             # Font setup (cache on self to avoid re-loading each frame)
@@ -385,38 +392,91 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                                     self._overlay_font = ImageFont.load_default()
                             font = self._overlay_font
 
-                            text_color = (255, 255, 255)
-                            stroke_fill = (0, 0, 0)
+                            text_color = (0, 0, 0)
+                            stroke_fill = None
 
-                            # Prepare GLOBAL instruction: prefix only on first line, indent wrapped lines
-                            global_instr = f"{episode_instruction}"
-                            wrapped_global = textwrap.fill(global_instr, width=90)
-                            wrapped_global_lines = wrapped_global.split('\n')
-                            if wrapped_global_lines:
-                                labeled_global_lines = [f"GLOBAL: {wrapped_global_lines[0]}"]
-                                labeled_global_lines += [f"  {line}" for line in wrapped_global_lines[1:]]
-                                wrapped_global_labeled = '\n'.join(labeled_global_lines)
-                            else:
-                                wrapped_global_labeled = "GLOBAL:"
+                            # Estimate wrap width for the side panel
+                            approx_char_w = max(8, int(font_size * 0.55))
+                            wrap_w = max(28, int((panel_w - 20) / approx_char_w))
 
-                            # LOCAL instruction preparation: same style
-                            local_instr_labeled = ""
+                            def _wrap_block(label: str, text: str) -> str:
+                                if not text:
+                                    return f"{label}:"
+                                wrapped = textwrap.fill(str(text), width=wrap_w)
+                                lines = wrapped.split("\n")
+                                out = [f"{label}: {lines[0]}"]
+                                out += [f"  {ln}" for ln in lines[1:]]
+                                return "\n".join(out)
+
+                            # GLOBAL / LOCAL
+                            global_block = _wrap_block("GLOBAL", episode_instruction)
+                            local_text = ""
                             if hasattr(self.agent, "current_instruction") and self.agent.current_instruction:
-                                local_instr_text = f"{self.agent.current_instruction}"
-                                wrapped_local = textwrap.fill(local_instr_text, width=90)
-                                wrapped_local_lines = wrapped_local.split('\n')
-                                if wrapped_local_lines:
-                                    labeled_local_lines = [f"LOCAL:  {wrapped_local_lines[0]}"]
-                                    labeled_local_lines += [f"  {line}" for line in wrapped_local_lines[1:]]
-                                    local_instr_labeled = '\n'.join(labeled_local_lines)
+                                local_text = str(self.agent.current_instruction)
+                            local_block = _wrap_block("LOCAL", local_text) if local_text else "LOCAL:"
 
-                            # Compose overlay text
-                            if local_instr_labeled:
-                                combined_text = f"{wrapped_global_labeled}\n{local_instr_labeled}"
+                            # System / navigation status
+                            sys_lines = []
+                            # Prefer agent-provided counters if available (System3Agent)
+                            if hasattr(self.agent, "episode_step"):
+                                sys_lines.append(f"sys1_steps={getattr(self.agent, 'episode_step')}")
+                            if hasattr(self.agent, "sys2_call_count"):
+                                sys_lines.append(f"sys2_calls={getattr(self.agent, 'sys2_call_count')}")
+                            if hasattr(self.agent, "sys3_call_count"):
+                                sys_lines.append(f"sys3_calls={getattr(self.agent, 'sys3_call_count')}")
+                            if hasattr(self.agent, "subepisode_id"):
+                                sys_lines.append(f"subep={getattr(self.agent, 'subepisode_id')}")
+                            sys_lines.append(f"eval_step={step_id}")
+
+                            nav_status = getattr(self.agent, "last_sys3_status", None) if hasattr(self.agent, "last_sys3_status") else None
+                            nav_status_line = f"NAV_STATUS={nav_status}" if nav_status else ""
+                            if hasattr(self.agent, "last_sys3_updated_step") and getattr(self.agent, "last_sys3_updated_step") is not None:
+                                nav_status_line = (nav_status_line + " " if nav_status_line else "") + f"(updated@{getattr(self.agent, 'last_sys3_updated_step')})"
+
+                            # Agent overlay summary line (S2 action/pixel goal)
+                            agent_state_line = ""
+                            if hasattr(self.agent, "get_overlay_state_line"):
+                                try:
+                                    agent_state_line = self.agent.get_overlay_state_line(info)
+                                except Exception as e:
+                                    logger.warning(f"Agent overlay state failed: {e}")
+
+                            # Env metrics
+                            env_parts = []
+                            if "success" in info:
+                                try:
+                                    env_parts.append(f"success={float(info['success']):.2f}")
+                                except Exception:
+                                    env_parts.append(f"success={info['success']}")
+                            if "distance_to_goal" in info:
+                                try:
+                                    env_parts.append(f"ne={float(info['distance_to_goal']):.2f}")
+                                except Exception:
+                                    env_parts.append(f"ne={info['distance_to_goal']}")
+                            env_line = "ENV: " + " ".join(env_parts) if env_parts else ""
+
+                            sys_block = "SYS: " + " | ".join([s for s in sys_lines if s])
+                            if nav_status_line:
+                                sys_block += "\n" + "STATUS: " + nav_status_line
+                            if agent_state_line:
+                                sys_block += "\n" + "S2: " + agent_state_line
+                            if env_line:
+                                sys_block += "\n" + env_line
+
+                            # System 3 thought (may be long): wrap + truncate to keep panel readable
+                            thought_text = ""
+                            if hasattr(self.agent, "last_sys3_thought") and getattr(self.agent, "last_sys3_thought"):
+                                thought_text = str(getattr(self.agent, "last_sys3_thought"))
+                            if thought_text:
+                                # keep the most recent tail; it tends to contain final decision
+                                max_chars = 1400
+                                if len(thought_text) > max_chars:
+                                    thought_text = "… " + thought_text[-max_chars:]
+                                thought_block = _wrap_block("THOUGHT", thought_text)
                             else:
-                                combined_text = wrapped_global_labeled
+                                thought_block = "THOUGHT:"
 
-                            # Optionally draw S2 pixel info (from InternVLAN1Agent) and append state/metrics lines
+                            combined_text = "\n\n".join([global_block, local_block, sys_block, thought_block])
 
                             # S2 pixel information (if available on the agent): draw directly on the RGB frame
                             if hasattr(self.agent, "last_s2_pixel") and getattr(self.agent, "last_s2_pixel") is not None:
@@ -428,39 +488,16 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                                 x = max(0, min(width - 1, x))
                                 y = max(0, min(height - 1, y))
                                 r = 5
-                                # Draw a small red dot at the pixel coordinate
-                                draw.ellipse((x - r, y - r, x + r, y + r), fill=(255, 0, 0), outline=(0, 0, 0), width=2)
-
-                            # Ask the agent (if it supports it) for a one-line state summary
-                            agent_state_line = ""
-                            if hasattr(self.agent, "get_overlay_state_line"):
-                                try:
-                                    agent_state_line = self.agent.get_overlay_state_line(info)
-                                except Exception as e:
-                                    logger.warning(f"Agent overlay state failed: {e}")
-
-                            # Termination/metrics info from Habitat (success, distance to goal, etc.)
-                            env_status_line = ""
-                            status_parts = []
-                            if "success" in info:
-                                try:
-                                    status_parts.append(f"success={float(info['success']):.2f}")
-                                except Exception:
-                                    status_parts.append(f"success={info['success']}")
-                            if "distance_to_goal" in info:
-                                try:
-                                    status_parts.append(f"ne={float(info['distance_to_goal']):.2f}")
-                                except Exception:
-                                    status_parts.append(f"ne={info['distance_to_goal']}")
-                            if status_parts:
-                                env_status_line = "ENV: " + " ".join(status_parts)
-
-                            extra_lines = [line for line in (agent_state_line, env_status_line) if line]
-                            if extra_lines:
-                                combined_text = f"{combined_text}\n\n" + "\n".join(extra_lines)
-
-                            # Draw text
-                            draw.text((10, 10), combined_text, font=font, fill=text_color, stroke_width=2, stroke_fill=stroke_fill)
+                                draw.ellipse(
+                                    (x - r, y - r, x + r, y + r),
+                                    fill=(255, 0, 0),
+                                    outline=(0, 0, 0),
+                                    width=2,
+                                )
+                            # Draw text into the white panel
+                            text_x = w + 10
+                            text_y = 10
+                            draw.text((text_x, text_y), combined_text, font=font, fill=text_color)
 
                             frame = np.array(pil_img)
                         except Exception as e:
@@ -468,38 +505,64 @@ class HabitatVLNEvaluator(DistributedEvaluator):
 
                         vis_frames.append(frame)
 
-                    # For agent-driven modes (e.g., System 3), we mimic the
-                    # original dual-system evaluator's hard-coded camera tilt
-                    # protocol around LOOK_DOWN (5) / LOOK_UP (4):
+                    # Agent expects list, returns list
+                    agent_outputs = self.agent.step([_make_agent_obs_input(observations)])
+                    agent_output = agent_outputs[0]
+                    action = agent_output['action'][0]
+                    
+                    _append_vis_frame(observations)
+
+                    # Habitat-specific camera-tilt protocol kept in evaluator.
                     #
-                    #   - When the agent emits 5, we apply two env steps with
-                    #     action=5 to obtain a proper look-down image for
-                    #     pixel-goal prediction.
-                    #   - Before executing the first subsequent non-5 action
-                    #     (typically the start of the S1 local trajectory),
-                    #     we apply two env steps with action=4 to bring the
-                    #     camera back to horizontal.
+                    # If the agent emits LOOK_DOWN (5), we:
+                    #   1) env.step(5), env.step(5) -> obtain down-looking observation
+                    #   2) feed that down-looking observation back into the agent once
+                    #      (twice if it returns internal NO-OP -1) so it can produce
+                    #      the next "real" navigation action
+                    #   3) env.step(4), env.step(4) -> restore pitch to horizontal
+                    #   4) execute the next real action (if any)
                     #
-                    # This guarantees that every explicit LOOK_DOWN request
-                    # from the planner is paired with a matching LOOK_UP
-                    # sequence at the environment level, regardless of the
-                    # learned model's own 4/5 pattern.
-                    if action == 5:
-                        # Apply two look-down steps to the simulator.
-                        _, _, done, _ = self.env.step(5)
-                        observations, _, done, _ = self.env.step(5)
-                        # Schedule two LOOK_UP actions to be applied just
-                        # before the next non-5 agent action.
-                        self._pending_look_up_steps = 2
+                    # This matches the dual-system evaluator behavior while keeping the
+                    # agent environment-agnostic.
+                    if action == -1:
+                        # Internal NO-OP used by some agents to advance their own state.
+                        # Do not step the environment.
+                        pass
                     else:
-                        # If we owe LOOK_UP steps from a prior LOOK_DOWN,
-                        # apply them now before executing this non-5 action.
-                        if self._pending_look_up_steps > 0:
-                            for _ in range(self._pending_look_up_steps):
+                        tilt_cycles = 0
+                        while (not done) and action == 5 and tilt_cycles < 4:
+                            # 1) Two look-down steps to get the down-looking frame.
+                            for _ in range(2):
+                                observations, _, done, _ = self.env.step(5)
+                                if done:
+                                    break
+                            if done:
+                                break
+
+                            down_obs = observations
+
+                            # 2) Let agent consume the down-looking observation to
+                            #    compute the next action. Some agents may emit an
+                            #    internal NO-OP (-1) first; call once more in that case.
+                            agent_output = self.agent.step([_make_agent_obs_input(down_obs)])[0]
+                            action = agent_output['action'][0]
+                            if action == -1:
+                                agent_output = self.agent.step([_make_agent_obs_input(down_obs)])[0]
+                                action = agent_output['action'][0]
+
+                            # Record the down-looking frame after S2 has produced the pixel-goal.
+                            _append_vis_frame(down_obs)
+
+                            # 3) Restore camera pitch back to horizontal.
+                            for _ in range(2):
                                 observations, _, done, _ = self.env.step(4)
-                            self._pending_look_up_steps = 0
-                        # Execute the agent's actual action.
-                        observations, _, done, _ = self.env.step(action)
+                                if done:
+                                    break
+                            tilt_cycles += 1
+
+                        # 4) Execute the (non-LOOK_DOWN) action, if any.
+                        if (not done) and action not in (-1, 5):
+                            observations, _, done, _ = self.env.step(action)
 
                     if done and not done_by_env_flag:
                         logger.info(
