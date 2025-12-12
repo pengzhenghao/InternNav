@@ -298,6 +298,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 episode.instruction.instruction_text if 'objectnav' not in self.config_path else episode.object_category
             )
             logger.info("Episode start %s_%04d: %s", scene_id, episode_id, episode_instruction)
+            global_instruction = episode_instruction
 
             # Log dump setup
             log_dump_dir = os.path.join(self.output_path, f'log_{self.epoch}', f'{scene_id}')
@@ -359,6 +360,9 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 # print("debug: step_id", step_id)
                 # print("debug: done", done)
                 # print("debug: max_steps_per_episode", self.max_steps_per_episode)
+
+                pixel_goal = None  # track latest pixel goal for overlay
+                pixel_goal_ref_size = None  # (w, h) of the image on which pixel_goal is defined
 
                 # refactor agent get action
                 rgb = observations["rgb"]
@@ -519,6 +523,12 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         forward_action = 0
                         coord = [int(c) for c in re.findall(r'\d+', llm_outputs)]
                         pixel_goal = [int(coord[1]), int(coord[0])]
+                        # Pixel goal is defined on the model input image size
+                        if len(input_images) > 0:
+                            w_ref, h_ref = input_images[-1].size
+                            pixel_goal_ref_size = (w_ref, h_ref)
+                        else:
+                            pixel_goal_ref_size = (self.model_args.resize_w, self.model_args.resize_h)
 
                         intrinsic_matrix = self.get_intrinsic_matrix(
                             self.config.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor
@@ -677,13 +687,121 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                     action = 0
 
                 if info['top_down_map'] is not None:
-                    if save_dot:
-                        save_raw_image = self.dot_matrix_two_dimensional(
-                            save_raw_image, save_img=False, save_path=f'test_{step_id}.jpg', pixel_goal=pixel_goal
-                        )
                     if self.save_video:
-                        frame = observations_to_image({'rgb': np.asarray(save_raw_image)}, info)
-                        vis_frames.append(frame)
+                        # 1) Draw pixel goal on RGB if available (scale from ref size to raw RGB)
+                        if pixel_goal is not None and pixel_goal_ref_size is not None:
+                            try:
+                                pg_x, pg_y = int(pixel_goal[1]), int(pixel_goal[0])  # pixel_goal is [row, col] => [y, x]
+                                ref_w, ref_h = pixel_goal_ref_size
+                                rgb_w, rgb_h = save_raw_image.size
+                                scale_x = rgb_w / float(ref_w) if ref_w else 1.0
+                                scale_y = rgb_h / float(ref_h) if ref_h else 1.0
+                                pg_x = int(pg_x * scale_x)
+                                pg_y = int(pg_y * scale_y)
+                                pg_x = max(0, min(rgb_w - 1, pg_x))
+                                pg_y = max(0, min(rgb_h - 1, pg_y))
+                                rgb_overlay = save_raw_image.copy()
+                                draw_pg = ImageDraw.Draw(rgb_overlay)
+                                r = 6
+                                draw_pg.ellipse((pg_x - r, pg_y - r, pg_x + r, pg_y + r), fill=(255, 0, 0), outline=(0, 0, 0), width=2)
+                                rgb_for_vis = np.asarray(rgb_overlay)
+                            except Exception:
+                                rgb_for_vis = np.asarray(save_raw_image)
+                        else:
+                            rgb_for_vis = np.asarray(save_raw_image)
+
+                        # Row 1: RGB + Map
+                        frame_row1 = observations_to_image({'rgb': rgb_for_vis}, info)
+                        h, w = frame_row1.shape[:2]
+
+                        # Row 2: Text Panel (fixed height to avoid resize jitter)
+                        text_h = 420
+                        text_img = Image.new("RGB", (w, text_h), (255, 255, 255))
+                        draw = ImageDraw.Draw(text_img)
+                        font_size = 22
+                        if not hasattr(self, "_vis_overlay_font_mono"):
+                            # Prefer Roboto Mono if present; fall back to DejaVuSansMono; then default.
+                            env_font = os.environ.get("VIS_OVERLAY_FONT", None)
+                            candidate_fonts = [
+                                env_font,
+                                "/usr/share/fonts/truetype/roboto/RobotoMono-Regular.ttf",             # common Linux
+                                "/usr/share/fonts/truetype/google/RobotoMono-Regular.ttf",             # alt Linux
+                                "/Library/Fonts/RobotoMono-Regular.ttf",                                # macOS
+                                "C:\\Windows\\Fonts\\RobotoMono-Regular.ttf",                           # Windows
+                                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",                 # Linux fallback
+                            ]
+                            font_loaded = None
+                            for fp in candidate_fonts:
+                                if not fp:
+                                    continue
+                                try:
+                                    if os.path.exists(fp):
+                                        font_loaded = ImageFont.truetype(fp, font_size)
+                                        break
+                                except Exception:
+                                    continue
+                            if font_loaded is None:
+                                font_loaded = ImageFont.load_default()
+                            self._vis_overlay_font_mono = font_loaded
+                        font = self._vis_overlay_font_mono
+
+                        global_instr = global_instruction
+                        local_instr = episode.instruction.instruction_text
+                        status = getattr(self.agent, "last_sys3_status", "N/A")
+                        thought = getattr(self.agent, "last_sys3_thought", "")
+
+                        # Pixel goal string
+                        pg_str = "None"
+                        if pixel_goal is not None:
+                            pg_str = f"[{pixel_goal[0]}, {pixel_goal[1]}]"
+
+                        # Actions and queue
+                        action_map = {0: 'STOP', 1: '↑', 2: '←', 3: '→', 4: '↑^', 5: '↓'}
+                        act_str = action_map.get(action, str(action)) if action is not None else "None"
+                        queue_str = " ".join([action_map.get(a, str(a)) for a in local_actions]) if local_actions else ""
+                        status_line = f"STATUS: {status:<12}  PIXEL: {pg_str:<18}  ACTION: {act_str}  QUEUE: {queue_str}"
+
+                        # Limit thought length/lines to fit panel
+                        wrap_width = int(w / (font_size * 0.6))
+                        max_lines = max(4, text_h // (font_size + 6) - 6)
+                        if thought and len(thought) > 800:
+                            thought = thought[:800] + "..."
+                        thought_lines = textwrap.wrap(f"THOUGHT: {thought}", width=wrap_width) if thought else ["THOUGHT:"]
+                        if len(thought_lines) > max_lines:
+                            thought_lines = thought_lines[:max_lines]
+                            if thought_lines:
+                                thought_lines[-1] += " ..."
+
+                        sections = [
+                            [f"GLOBAL: {global_instr}"],
+                            [f"LOCAL : {local_instr}"],
+                            [status_line],
+                            thought_lines,
+                        ]
+
+                        y_text = 10
+                        sep_color = (200, 200, 200)
+                        sep_pad = 6
+                        # Top divider line between videos and text panel
+                        draw.line([(0, 0), (w, 0)], fill=sep_color, width=1)
+                        y_text = 10
+
+                        for idx, section_lines in enumerate(sections):
+                            for line in section_lines:
+                                wrapped = textwrap.wrap(line, width=wrap_width)
+                                for wl in wrapped:
+                                    draw.text((10, y_text), wl, font=font, fill=(0, 0, 0))
+                                    y_text += font_size + 6
+                            y_text += sep_pad
+                            # Draw a thin separator except after the last section
+                            if idx < len(sections) - 1:
+                                draw.line([(10, y_text), (w - 10, y_text)], fill=sep_color, width=1)
+                                y_text += sep_pad
+
+                        canvas = np.full((h + text_h, w, 3), 255, dtype=np.uint8)
+                        canvas[:h, :w] = frame_row1
+                        canvas[h:, :w] = np.array(text_img)
+                        vis_frames.append(canvas)
 
                 # print("step_id", step_id, "action", action)
 
