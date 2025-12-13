@@ -38,10 +38,11 @@ eval_cfg = EvalCfg(
     ),
     eval_type='habitat_vln',
     eval_settings={
-        "output_path": "./logs/habitat/test_system3_tiny",
+        # match curated tiny split with 2 instructions per scene
+        "output_path": "./logs/habitat/test_system3_scene2",
         "save_video": True,
         "epoch": 0,
-        "max_steps_per_episode": 200,
+        "max_steps_per_episode": 80,
         "port": "2334",
         "dist_url": "env://",
     },

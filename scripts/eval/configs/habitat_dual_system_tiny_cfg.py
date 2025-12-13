@@ -27,7 +27,8 @@ eval_cfg = EvalCfg(
     eval_type='habitat_vln',
     eval_settings={
         # all current parse args
-        "output_path": "./logs/habitat/test_dual_system_tiny",  # output directory for logs/results
+        # match curated tiny split with 2 instructions per available scene
+        "output_path": "./logs/habitat/test_dual_system_scene2",  # output directory for logs/results
         "save_video": True,  # whether to save videos
         "epoch": 0,  # epoch number for logging
         "max_steps_per_episode": 500,  # maximum steps per episode
