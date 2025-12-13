@@ -14,6 +14,7 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .internvla_n1_arch import InternVLAN1MetaForCausalLM, InternVLAN1MetaModel
+TRAJ_START_TOKEN_INDEX = 151665
 TRAJ_TOKEN_INDEX = 151667
 IMAGE_TOKEN_INDEX = 151655
 _RESNET_MEAN = [0.485, 0.456, 0.406]
@@ -317,11 +318,14 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         )
 
     def generate_latents(self, input_ids, pixel_values, image_grid_thw):
-        input_ids.to(self.get_model().device)
+        input_ids = input_ids.to(self.get_model().device)
+        input_ids = torch.cat(
+            [input_ids, torch.tensor([[TRAJ_START_TOKEN_INDEX]], device=input_ids.device)], dim=1
+        )
         with torch.no_grad():
             text_embeds = self.get_model().embed_tokens(input_ids)
         latent_queries = self.get_model().latent_queries.repeat(text_embeds.shape[0], 1, 1)
-        image_idx = input_ids == IMAGE_TOKEN_INDEX
+        image_idx = input_ids == self.config.image_token_id
         N_QUERY = self.get_n_query()
         input_ids = torch.cat([input_ids, torch.tensor([[TRAJ_TOKEN_INDEX] * N_QUERY]).to(input_ids.device)], dim=1)
 
