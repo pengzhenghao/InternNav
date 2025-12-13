@@ -709,6 +709,10 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 if action == 5:
                     self.env.step(action)
                     observations, _, done, _ = self.env.step(action)
+                elif action == -1:
+                    # just pass, don't do anything
+                    step_id += 1
+                    messages = []
                 else:
                     observations, _, done, _ = self.env.step(action)
                     step_id += 1
