@@ -10,6 +10,7 @@ from typing import List, Dict, Optional, Any
 from io import BytesIO
 from PIL import Image
 from openai import OpenAI
+import numpy as np
 
 from internnav.agent.base import Agent
 from internnav.agent.internvla_n1_agent import InternVLAN1Agent
@@ -331,7 +332,7 @@ Your Loop:
         s3_calls = sys3_calls if sys3_calls is not None else 0
         s1_steps = sys1_steps if sys1_steps is not None else 0
         query = (
-            "Please decide whether to KEEP the current navigation instruction or CHANGE it, "
+            "Please reason and decide whether to KEEP the current navigation instruction or CHANGE it, "
             "and use the tool to output your decision."
         )
 
@@ -403,6 +404,7 @@ Your Loop:
         thought = plan["thought"]
         status = plan["status"]
         instruction = plan["instruction"]
+        change_instruction = plan["change_instruction"]
 
         # TODO: step should include sys2 and sys1 and sys3 steps.
         step_idx = self.history.__len__() // 2  # each assistant add bumps this
@@ -418,7 +420,6 @@ Your Loop:
             sys3_calls=sys3_calls,
         )
 
-
         logger.info(
             f"\n[Sys3] Step {step_idx}\n"
             f"  Status      : {status}\n"
@@ -426,10 +427,9 @@ Your Loop:
             f"  Thought     : {thought}\n"
         )
 
-
         # Maintain a compact text-only summary to keep context small
         # NOTE: We DO NOT add the 'thought' to the history, only the instruction/status.
-        if instruction:
+        if change_instruction:
             self.history.append(
                 {
                     "role": "user",
@@ -629,49 +629,52 @@ class System3Agent(InternVLAN1Agent):
         
         self.subepisode_frames_b64.append(img_b64)
         if len(self.subepisode_frames_b64) > self.max_subepisode_frames:
-            self.subepisode_frames_b64 = self.subepisode_frames_b64[-self.max_subepisode_frames:]
+            # Uniformly select max_subepisode_frames frames over the available range
+            total_frames = len(self.subepisode_frames_b64)
+            if total_frames > self.max_subepisode_frames:
+                # Uniform spacing, endpoints included
+                indices = np.linspace(0, total_frames - 1, num=self.max_subepisode_frames, dtype=int)
+                subepisode_frames_b64 = [self.subepisode_frames_b64[i] for i in indices]
+        else:
+            subepisode_frames_b64 = self.subepisode_frames_b64
             
         assert self.navigator
         
-        interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
-        should_call_sys3 = self.force_sys3_next or interval_ok or self.episode_step == 0
+        # interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
+        # should_call_sys3 = self.force_sys3_next or interval_ok or self.episode_step == 0
+        # if should_call_sys3:
+
+        self.sys3_call_count += 1
+        plan = self.navigator.plan_next_step(
+            img_b64,
+            sys1_steps=self.episode_step,
+            sys2_calls=self.sys2_call_count,
+            sys3_calls=self.sys3_call_count,
+            current_instruction=self.current_instruction,
+            subepisode_id=self.subepisode_id,
+            history_imgs=subepisode_frames_b64,
+        )
+        self.last_sys3_step = self.episode_step
+        self.force_sys3_next = False
         
-        if should_call_sys3:
-            self.sys3_call_count += 1
-            plan = self.navigator.plan_next_step(
-                img_b64,
-                sys1_steps=self.episode_step,
-                sys2_calls=self.sys2_call_count,
-                sys3_calls=self.sys3_call_count,
-                current_instruction=self.current_instruction,
-                subepisode_id=self.subepisode_id,
-                history_imgs=self.subepisode_frames_b64,
-            )
-            self.last_sys3_step = self.episode_step
-            self.force_sys3_next = False
+        if plan:
+            status = plan.get("status")
+            change_instruction = plan.get("change_instruction", True)
+            new_instruction = plan.get("instruction")
+            discrete_actions = plan.get("discrete_actions", [])
             
-            if plan:
-                status = plan.get("status")
-                change_instruction = plan.get("change_instruction", True)
-                new_instruction = plan.get("instruction")
-                discrete_actions = plan.get("discrete_actions", [])
-                
-                self.last_sys3_status = status
-                self.last_sys3_thought = plan.get("thought")
-                self.last_sys3_updated_step = self.episode_step
-                
-                if status == "DONE":
-                    return None, "DONE", plan.get("thought")
-                
-                if change_instruction and new_instruction:
-                    if new_instruction != self.current_instruction:
-                        # Reset Sys2 state
-                        if hasattr(self, "reset_sys2_state"):
-                            self.reset_sys2_state()
-                        
-                        self.current_instruction = new_instruction
-                        self.subepisode_id += 1
-                        self.subepisode_frames_b64 = [img_b64] # Start new sub-episode
+            self.last_sys3_status = status
+            self.last_sys3_thought = plan.get("thought")
+            self.last_sys3_updated_step = self.episode_step
+            
+            if status == "DONE":
+                return None, "DONE", plan.get("thought")
+            
+            if change_instruction and new_instruction:
+                assert new_instruction != self.current_instruction, "System 3 should not change the instruction to the same one"
+                self.current_instruction = new_instruction
+                self.subepisode_id += 1
+                self.subepisode_frames_b64 = [img_b64] # Start new sub-episode
                         
         return self.current_instruction, self.last_sys3_status, self.last_sys3_thought
 
@@ -732,203 +735,3 @@ class System3Agent(InternVLAN1Agent):
             f"[Sys3] Prompt dump configured: dump_dir={dump_dir}, freq={self.prompt_dump_freq}, "
             f"episode_id={episode_id}"
         )
-
-    def step(self, obs: List[Dict[str, Any]]):
-        logger.info(f"[Sys3] Episode step {self.episode_step}. Sys2 calls: {self.sys2_call_count}. Sys3 calls: {self.sys3_call_count}.")
-        # Handle single observation (batch size 1)
-        current_obs = obs[0]
-        rgb = current_obs['rgb'] # numpy array (H, W, 3)
-        # Convert current frame once and append to sub-episode history
-        image = Image.fromarray(rgb.astype('uint8'), 'RGB')
-        img_b64 = pil_to_base64(image)
-        self.subepisode_frames_b64.append(img_b64)
-        if len(self.subepisode_frames_b64) > self.max_subepisode_frames:
-            # Keep only the most recent N frames in this sub-episode
-            self.subepisode_frames_b64 = self.subepisode_frames_b64[-self.max_subepisode_frames:]
-        # 1. System 3 Logic: Only call if System 2 needs to run
-        # We check self.should_infer_s2(self.mode) OR if we are looking down (which forces inference)
-        # Note: 'look_down' logic is handled in super().step, but we need to know if we should update instruction now.
-        assert self.navigator
-
-        should_call_sys2 = self.should_infer_s2(self.mode) or self.look_down
-        interval_ok = (self.episode_step - self.last_sys3_step) >= self.sys3_interval_steps
-
-        # TODO: better logic for calling sys3.
-        # If System 2 has just reported that its local plan is DONE (STOP),
-        # we set force_sys3_next=True so that System 3 immediately issues a
-        # new instruction, regardless of the usual interval throttle.
-        should_call_sys3 = should_call_sys2 and (
-            self.force_sys3_next or interval_ok or self.episode_step == 0
-        )
-        if should_call_sys3:
-            # Plan next step with System 3, using sub-episode history
-            self.sys3_call_count += 1
-            plan = self.navigator.plan_next_step(
-                img_b64,
-                sys1_steps=self.episode_step,
-                sys2_calls=self.sys2_call_count,
-                sys3_calls=self.sys3_call_count,
-                current_instruction=self.current_instruction,
-                subepisode_id=self.subepisode_id,
-                history_imgs=self.subepisode_frames_b64,
-            )
-            self.last_sys3_step = self.episode_step
-            # We have just made a System 3 call, so clear the force flag.
-            self.force_sys3_next = False
-            
-            if plan:
-                status = plan.get("status")
-                change_instruction = plan.get("change_instruction", True)
-                new_instruction = plan.get("instruction")
-                discrete_actions = plan.get("discrete_actions", [])
-                # Cache System 3 reasoning for visualization/debugging
-                self.last_sys3_status = status
-                self.last_sys3_thought = plan.get("thought")
-                self.last_sys3_updated_step = self.episode_step
-
-                if status == "DONE":
-                    logger.info(
-                        "[Sys3] Termination requested by System 3 (status=DONE, change_instruction=%s). "
-                        "Emitting STOP action (0) to environment.",
-                        change_instruction,
-                    )
-                    return [{'action': [0], 'ideal_flag': True}]
-
-                # Check for discrete actions to bypass System 2
-                if discrete_actions:
-                    actions_list = []
-                    for act_name in discrete_actions:
-                        if act_name in ACTION_NAME_TO_ID:
-                            actions_list.append(ACTION_NAME_TO_ID[act_name])
-                        else:
-                            logger.warning(f"[Sys3] Unknown discrete action: {act_name}")
-                    
-                    if actions_list:
-                        logger.info(f"[Sys3] Executing discrete actions: {discrete_actions} -> {actions_list}")
-                        with self.s2_output_lock:
-                            self.s2_output.output_action = actions_list
-                            self.s2_output.output_pixel = None
-                            self.s2_output.output_latent = None
-                            self.s2_output.is_infering = False
-                        
-                        # Discrete actions take precedence. We set them, so InternVLAN1Agent.step() 
-                        # will see them and skip S2 inference, effectively bypassing the local planner.
-                        # We also force a System 3 call on the next step after these actions are done,
-                        # to ensure System 3 stays in control.
-                        # However, we don't know exactly when they finish if >1. 
-                        # InternVLAN1Agent consumes one per step.
-                        # If we want System 3 to be called again after the queue is empty, 
-                        # we rely on force_sys3_next being set when the queue empties?
-                        # Currently InternVLAN1Agent sets force_sys3_next ONLY if it emits STOP.
-                        # We might need to handle this.
-                        # For now, let's just let it run. If queue empties, S2 inference triggers next time.
-                        pass
-
-                if change_instruction and new_instruction:
-                    # New instruction => start a new sub-episode and hard-reset
-                    # the low-level S1/S2 state so that the next S2 planning
-                    # step is based purely on this new local goal.
-                    if new_instruction != self.current_instruction:
-                        # Reset System 1 / System 2 state but keep global
-                        # episode / System 3 state intact.
-                        
-                        
-                        if hasattr(self, "reset_sys2_state"):
-                            try:
-                                self.reset_sys2_state()
-                            except Exception as e:
-                                logger.warning(f"[Sys3] reset_sys2_state failed: {e}")
-                        
-                        
-                        self.current_instruction = new_instruction
-                        self.subepisode_id += 1
-                        # Start new sub-episode buffer with the latest frame only.
-                        self.subepisode_frames_b64 = [img_b64]
-                        logger.info(f"[Sys3] New instruction (sub-episode {self.subepisode_id}): {self.current_instruction}")
-                else:
-                    # Keep current instruction; just log that System 3 chose not to change it.
-                    logger.info(f"[Sys3] Keeping current instruction: {self.current_instruction}")
-        
-        # 2. Update instruction for System 2
-        if self.current_instruction:
-            current_obs['instruction'] = self.current_instruction
-
-        if should_call_sys2:
-            self.sys2_call_count += 1  # track how many times Sys2 inference is requested
-        
-        # 3. System 2 Logic: Call parent step.
-        # NOTE: InternVLAN1Agent uses a special "look_down" mechanism triggered
-        # by an internal S2 action=5. On the first call after that, it sets
-        # self.look_down=True and returns a NO-OP (-1) action while preparing
-        # internal state. On the *next* call with look_down=True, it uses that
-        # state to produce the actual navigation action.
-        #
-        # To preserve that behavior, we mirror the original pattern:
-        #   ret = super().step(obs)
-        #   if self.look_down: ret = super().step(obs)
-        #
-        # Our STOP interception logic is applied only to the final 'ret'.
-        ret = super().step(obs)
-        # if self.look_down:
-        #     ret = super().step(obs)
-
-        # Intercept System 2 STOP (action=0) so that it only ends the
-        # current sub-episode, not the whole Habitat episode.
-        # The full episode should terminate only when System 3 explicitly
-        # returns status="DONE" (handled earlier in this method).
-        try:
-            assert len(ret) == 1, "System 2 should return a list with one element"
-            if isinstance(ret, list) and ret and 'action' in ret[0]:
-                act = ret[0]['action'][0] if ret[0]['action'] else None
-                if act == 0:
-                    source = ret[0].get("action_source", None)
-
-                    # IMPORTANT: In this codebase, action==0 can originate from:
-                    # - System 2 discrete STOP (meaning S2 thinks the *local instruction* is complete)
-                    # - System 1 trajectory padding / end-of-local-plan (NOT S2 completion)
-                    #
-                    # The classic dual-system evaluator treats STOP from either source as
-                    # "replan/recover" (it takes a small recovery turn and clears the plan),
-                    # not as "end the Habitat episode". We mirror that here.
-                    if source == "sys2_discrete" or source is None:
-                        logger.info(
-                            "[Sys3] Intercepting System 2 STOP action (0) as local-plan completion; "
-                            "converting to recovery TURN_LEFT (2) and forcing replan. "
-                            "Full episode termination is controlled by System 3."
-                        )
-                        # Match the legacy evaluator: take a small recovery action instead of
-                        # stalling in place (NO-OP would change the trajectory distribution).
-                        ret[0]['action'][0] = 2
-                        ret[0]['ideal_flag'] = False
-                        # Mark that System 2 has finished its current local plan so that
-                        # System 3 is forced to compute a new instruction on the next step
-                        # (it may choose to keep the same instruction).
-                        self.force_sys3_next = True
-
-                        # Reset low-level state so the next step forces fresh S2 inference.
-                        if hasattr(self, "reset_sys2_state"):
-                            try:
-                                self.reset_sys2_state()
-                            except Exception as e:
-                                logger.warning(f"[Sys3] reset_sys2_state on STOP failed: {e}")
-                    else:
-                        # System 1 STOP / padding => treat as local-plan finished or invalid.
-                        # Mirror dual-system evaluator behavior: clear low-level plan and
-                        # take a small recovery action (TURN_LEFT=2) instead of ending the sub-episode.
-                        logger.info(
-                            "[Sys3] System 1 produced STOP/padding (0) (source=%s); "
-                            "treating as replan trigger (not sub-episode completion). "
-                            "Converting to recovery TURN_LEFT (2).",
-                            source,
-                        )
-                        ret[0]['action'][0] = 2
-                        ret[0]['ideal_flag'] = False
-                        if hasattr(self, "reset_sys2_state"):
-                            try:
-                                self.reset_sys2_state()
-                            except Exception as e:
-                                logger.warning(f"[Sys3] reset_sys2_state on Sys1 STOP failed: {e}")
-        except Exception as e:
-            logger.warning(f"[Sys3] Failed to post-process System 2 action: {e}")
-
-        return ret
