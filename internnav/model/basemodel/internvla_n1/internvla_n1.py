@@ -327,11 +327,11 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         )
 
     def generate_latents(self, input_ids, pixel_values, image_grid_thw):
-        input_ids.to(self.get_model().device)
+        input_ids = input_ids.to(self.get_model().device)
         input_ids = torch.cat([input_ids, torch.tensor([[TRAJ_START_TOKEN_INDEX]]).to(input_ids.device)], dim=1)
         text_embeds = self.get_model().embed_tokens(input_ids)
         latent_queries = self.get_model().latent_queries.repeat(text_embeds.shape[0], 1, 1)
-        image_idx = input_ids == IMAGE_TOKEN_INDEX
+        image_idx = input_ids == self.config.image_token_id
         N_QUERY = self.get_n_query()
         input_ids = torch.cat([input_ids, torch.tensor([[TRAJ_TOKEN_INDEX] * N_QUERY]).to(input_ids.device)], dim=1)
 

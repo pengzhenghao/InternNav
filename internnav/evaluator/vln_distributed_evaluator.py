@@ -28,7 +28,7 @@ class runner_status_code(Enum):
 class VLNDistributedEvaluator(DistributedEvaluator):
     def __init__(self, config: EvalCfg):
         start_time = time()
-
+        self.agent = None
         self.task_name = config.task.task_name
         self.result_logger = ResultLogger(config.dataset)
         self.dataset_name = Path(config.dataset.dataset_settings['base_data_dir']).name
