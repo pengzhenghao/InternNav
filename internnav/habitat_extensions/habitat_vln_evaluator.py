@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 class HabitatVLNEvaluator(DistributedEvaluator):
     def __init__(self, cfg: EvalCfg):
         args = argparse.Namespace(**cfg.eval_settings)
+        self.agent = None
         self.save_video = args.save_video
         self.epoch = args.epoch
         self.max_steps_per_episode = args.max_steps_per_episode
@@ -266,7 +267,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 for line in f.readlines():
                     res = json.loads(line)
                     if "scene_id" not in res:
-                        print("This evaluation has already finished!")
+                        logger.info("This evaluation has already finished; skipping remaining episodes.")
                         return (
                             torch.tensor(sucs).to(self.device),
                             torch.tensor(spls).to(self.device),
@@ -313,7 +314,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 if hasattr(self.agent, 'set_goal'):
                     self.agent.set_goal(episode_instruction)
             # Propagate prompt dump path/frequency to agent (for System3)
-            if hasattr(self.agent, "set_prompt_dump"):
+            if hasattr(self, "agent") and hasattr(self.agent, "set_prompt_dump"):
                 prompt_dump_dir = os.path.join(self.output_path, f'prompt_{self.epoch}', f'{scene_id}')
                 os.makedirs(prompt_dump_dir, exist_ok=True)
                 # dump every step by default; agent can throttle internally
@@ -350,6 +351,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             action = None
             messages = []
             local_actions = []
+            forward_action = 0
 
             done = False
             done_by_env_flag = False
@@ -423,198 +425,208 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         self.env.step(4)
                         self.env.step(4)
 
-                info = self.env.get_metrics()
-
                 # All pending discrete actions are gone and there might be last discrete action
                 # stored in 'action'.
+                system3_terminated = False
+                instruction_updated = False
                 if len(action_seq) == 0 and goal is None:
-                    if self.model_args.mode == 'system3':
+                    if self.model_args.mode == 'system3' and action != 5:
                         new_instr, status, thought = self.agent.update_instruction(observations)
 
-                        logger.info(
-                            f"System 3 output:\n"
-                            f"  Instruction: {new_instr}\n"
-                            f"  Status     : {status}\n"
-                            f"  Thought    : {thought}"
-                        )
-                        # FIXME: Just assume nothing happen for debug purpose.
-                        # if status == 'DONE':
-                        #     # Handle DONE: agent thinks we are done.
-                        #     # We need to break or set done=True?
-                        #     # The dual_system loop doesn't have a clean way to "just done" here except action=0?
-                        #     # If I set action=0 later, it might trigger done.
-                        #     # But here we are about to generate a goal.
-                        #     # If done, we shouldn't generate goal.
-                        #     pass
-
-                        #     # TOOD: trigger episode done pipeline.
-
-                        # if new_instr and new_instr != episode_instruction:
-                        #     logger.info(f"System 3 update instruction: {new_instr}")
-                        #     episode_instruction = new_instr
-                        #     # TODO: trigger reset pipeline.
-
-                    logger.info("Instruction: %s", episode.instruction.instruction_text)
-
-                    if action != 5:
-                        # Call system 2 again because it doesn't want to 
-                        # generate pixel goal yet.
-                        sources = copy.deepcopy(self.conversation)
-                        sources[0]["value"] = sources[0]["value"].replace(
-                            '<instruction>.', episode.instruction.instruction_text[:-1]
-                        )
-                        cur_images = rgb_list[-1:]
-                        if step_id == 0:
-                            history_id = []
-                        else:
-                            history_id = np.unique(
-                                np.linspace(0, step_id - 1, self.num_history, dtype=np.int32)
-                            ).tolist()
-                            placeholder = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_id)
-                            sources[0]["value"] += f' These are your historical observations: {placeholder}.'
-
-                        history_id = sorted(history_id)
-                        print('history_idddddddd', step_id, history_id)
-                        input_images = [rgb_list[i] for i in history_id] + cur_images
-                        input_img_id = 0
-                    else:
-                        assert action == 5
-                        sources = [{"from": "human", "value": ""}, {"from": "gpt", "value": ""}]
-                        input_images += [look_down_image]
-                        # messages.append(
-                        #     {'role': 'assistant', 'content': [{'type': 'text', 'text': llm_outputs}]}  # noqa: F405
+                        # logger.info(
+                        #     f"System 3 output:\n"
+                        #     f"  Instruction: {new_instr}\n"
+                        #     f"  Status     : {status}\n"
+                        #     f"  Thought    : {thought}"
                         # )
-                        input_img_id = -1
 
-                    prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
-                    sources[0]["value"] += f" {prompt}."
-                    print('sources', step_id, sources)
-                    prompt_instruction = copy.deepcopy(sources[0]["value"])
-                    parts = split_and_clean(prompt_instruction)
-
-                    content = []
-                    for i in range(len(parts)):
-                        if parts[i] == "<image>":
-                            content.append({"type": "image", "image": input_images[input_img_id]})
-                            input_img_id += 1
-                        else:
-                            content.append({"type": "text", "text": parts[i]})
-
-                    messages.append({'role': 'user', 'content': content})
-
-                    print('step_id', step_id, 'messages:', messages)
-
-                    text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-                    inputs = self.processor(text=[text], images=input_images, return_tensors="pt").to(self.model.device)
-
-                    if self.model_args.mode == 'system3':
-                        output_ids = self.agent.predict_goal(inputs)
-                    else:
-                        with torch.no_grad():
-                            output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False, top_k=None, top_p=None, temperature=None)
-
-                    llm_outputs = self.processor.tokenizer.decode(
-                        output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
-                    )
-                    print('step_id:', step_id, 'output text:', llm_outputs)
-
-                    if bool(re.search(r'\d', llm_outputs)):
-                        forward_action = 0
-                        coord = [int(c) for c in re.findall(r'\d+', llm_outputs)]
-                        pixel_goal = [int(coord[1]), int(coord[0])]
-                        # Pixel goal is defined on the model input image size
-                        if len(input_images) > 0:
-                            w_ref, h_ref = input_images[-1].size
-                            pixel_goal_ref_size = (w_ref, h_ref)
-                        else:
-                            pixel_goal_ref_size = (self.model_args.resize_w, self.model_args.resize_h)
-
-                        intrinsic_matrix = self.get_intrinsic_matrix(
-                            self.config.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor
-                        )
-                        goal = self.pixel_to_gps(pixel_goal, depth / 1000, intrinsic_matrix, tf_camera_to_episodic)
-                        print('before', goal, depth.shape)
-                        goal = (transformation_matrix @ np.array([-goal[1], 0, -goal[0], 1]))[:3]
-
-                        if not self.env._env.sim.pathfinder.is_navigable(np.array(goal)):
-                            goal = np.array(self.env._env.sim.pathfinder.snap_point(np.array(goal)))
-
-                        # look down --> horizontal
-                        self.env.step(4)
-                        self.env.step(4)
-
-                        # Forking logic based on mode
-                        if self.model_args.mode == 'system2':
-                            action = agent.get_next_action(goal)
-                            if action == 0:
-                                goal = None
-                                output_ids = None
-                                action = 2  # random action
-                                print('conduct a random action 2')
-                                observations, _, done, _ = self.env.step(action)
-                                step_id += 1
-                                messages = []
-                                continue
-                        else:  # dual-system logic
+                        if status == 'DONE':
+                            logger.info("System 3 requested episode termination; issuing STOP.")
+                            action = 0
+                            system3_terminated = True
                             local_actions = []
-                            pixel_values = inputs.pixel_values
-                            image_grid_thw = torch.cat([thw.unsqueeze(0) for thw in inputs.image_grid_thw], dim=0)
+                            messages = []
+                            output_ids = None
+                            forward_action = 0
+                        elif new_instr and new_instr != episode_instruction:
+                            logger.info("System 3 updated instruction: %s", new_instr)
+                            
+                            
+                            
+                            
+                            episode_instruction = new_instr
+                            
+                            
+                            
+                            instruction_updated = True
+                            local_actions = []
+                            messages = []
+                            output_ids = None
+                            forward_action = 0
 
-                            # prepocess align with navdp
-                            image_dp = (
-                                torch.tensor(np.array(look_down_image.resize((224, 224)))).to(torch.bfloat16) / 255
+                    logger.info("Instruction: %s", episode_instruction)
+
+                    if not system3_terminated:
+                        if action != 5:
+                            # Call system 2 again because it doesn't want to 
+                            # generate pixel goal yet.
+                            sources = copy.deepcopy(self.conversation)
+                            instr_text = episode_instruction[:-1] if episode_instruction.endswith('.') else episode_instruction
+                            sources[0]["value"] = sources[0]["value"].replace(
+                                '<instruction>.', instr_text
                             )
-                            pix_goal_image = copy.copy(image_dp)
-                            images_dp = torch.stack([pix_goal_image, image_dp]).unsqueeze(0).to(self.device)
-                            depth_dp = look_down_depth.unsqueeze(-1).to(torch.bfloat16)
-                            pix_goal_depth = copy.copy(depth_dp)
-                            depths_dp = torch.stack([pix_goal_depth, depth_dp]).unsqueeze(0).to(self.device)
+                            cur_images = rgb_list[-1:]
+                            if step_id == 0:
+                                history_id = []
+                            else:
 
-                            if self.model_args.mode == 'system3':
-                                dp_actions = self.agent.generate_local_actions(
-                                    output_ids, pixel_values, image_grid_thw, images_dp, depths_dp
+                                # TODO(pzh): uniformaly taking history images is wierd!
+
+                                history_id = np.unique(
+                                    np.linspace(0, step_id - 1, self.num_history, dtype=np.int32)
+                                ).tolist()
+                                placeholder = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_id)
+                                sources[0]["value"] += f' These are your historical observations: {placeholder}.'
+
+                            history_id = sorted(history_id)
+                            logger.debug("History ids at step %d: %s", step_id, history_id)
+                            input_images = [rgb_list[i] for i in history_id] + cur_images
+                            input_img_id = 0
+                        else:
+                            assert action == 5
+                            sources = [{"from": "human", "value": ""}, {"from": "gpt", "value": ""}]
+                            input_images += [look_down_image]
+                            input_img_id = -1
+
+                        prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
+                        sources[0]["value"] += f" {prompt}."
+                        logger.debug("Sources at step %d: %s", step_id, sources)
+                        prompt_instruction = copy.deepcopy(sources[0]["value"])
+                        parts = split_and_clean(prompt_instruction)
+
+                        content = []
+                        for i in range(len(parts)):
+                            if parts[i] == "<image>":
+                                content.append({"type": "image", "image": input_images[input_img_id]})
+                                input_img_id += 1
+                            else:
+                                content.append({"type": "text", "text": parts[i]})
+
+                        messages.append({'role': 'user', 'content': content})
+
+                        logger.debug("Step %d messages: %s", step_id, messages)
+
+                        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+                        inputs = self.processor(text=[text], images=input_images, return_tensors="pt").to(self.model.device)
+
+                        if self.model_args.mode == 'system3':
+                            output_ids = self.agent.predict_goal(inputs)
+                        else:
+                            with torch.no_grad():
+                                output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False, top_k=None, top_p=None, temperature=None)
+
+                        llm_outputs = self.processor.tokenizer.decode(
+                            output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+                        )
+                        logger.debug("Step %d output text: %s", step_id, llm_outputs)
+
+                        if bool(re.search(r'\d', llm_outputs)):
+                            forward_action = 0
+                            coord = [int(c) for c in re.findall(r'\d+', llm_outputs)]
+                            pixel_goal = [int(coord[1]), int(coord[0])]
+                            # Pixel goal is defined on the model input image size
+                            if len(input_images) > 0:
+                                w_ref, h_ref = input_images[-1].size
+                                pixel_goal_ref_size = (w_ref, h_ref)
+                            else:
+                                pixel_goal_ref_size = (self.model_args.resize_w, self.model_args.resize_h)
+
+                            intrinsic_matrix = self.get_intrinsic_matrix(
+                                self.config.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor
+                            )
+                            goal = self.pixel_to_gps(pixel_goal, depth / 1000, intrinsic_matrix, tf_camera_to_episodic)
+                            logger.debug("Goal before transform: %s depth shape=%s", goal, depth.shape)
+                            goal = (transformation_matrix @ np.array([-goal[1], 0, -goal[0], 1]))[:3]
+
+                            if not self.env._env.sim.pathfinder.is_navigable(np.array(goal)):
+                                goal = np.array(self.env._env.sim.pathfinder.snap_point(np.array(goal)))
+
+                            # look down --> horizontal
+                            self.env.step(4)
+                            self.env.step(4)
+
+                            # Forking logic based on mode
+                            if self.model_args.mode == 'system2':
+                                action = agent.get_next_action(goal)
+                                if action == 0:
+                                    goal = None
+                                    output_ids = None
+                                    action = 2  # random action
+                                    logger.info("System 2 produced STOP; taking recovery action TURN_LEFT (2).")
+                                    observations, _, done, _ = self.env.step(action)
+                                    step_id += 1
+                                    messages = []
+                                    continue
+                            else:  # dual-system logic
+                                local_actions = []
+                                pixel_values = inputs.pixel_values
+                                image_grid_thw = torch.cat([thw.unsqueeze(0) for thw in inputs.image_grid_thw], dim=0)
+
+                                # prepocess align with navdp
+                                image_dp = (
+                                    torch.tensor(np.array(look_down_image.resize((224, 224)))).to(torch.bfloat16) / 255
                                 )
-                            else:
-                                with torch.no_grad():
-                                    traj_latents = self.model.generate_latents(output_ids, pixel_values, image_grid_thw)
+                                pix_goal_image = copy.copy(image_dp)
+                                images_dp = torch.stack([pix_goal_image, image_dp]).unsqueeze(0).to(self.device)
+                                depth_dp = look_down_depth.unsqueeze(-1).to(torch.bfloat16)
+                                pix_goal_depth = copy.copy(depth_dp)
+                                depths_dp = torch.stack([pix_goal_depth, depth_dp]).unsqueeze(0).to(self.device)
 
-                                with torch.no_grad():
-                                    dp_actions = self.model.generate_traj(
-                                        traj_latents, images_dp, depths_dp, use_async=True
+                                if self.model_args.mode == 'system3':
+                                    dp_actions = self.agent.generate_local_actions(
+                                        output_ids, pixel_values, image_grid_thw, images_dp, depths_dp
                                     )
+                                else:
+                                    with torch.no_grad():
+                                        traj_latents = self.model.generate_latents(output_ids, pixel_values, image_grid_thw)
 
-                            random_choice = np.random.choice(dp_actions.shape[0])
-                            if self.model_args.continuous_traj:
-                                action_list = traj_to_actions(dp_actions)
-                                if len(action_list) < 8:
-                                    action_list += [0] * (8 - len(action_list))
-                            else:
-                                action_list = chunk_token(dp_actions[random_choice])
+                                    with torch.no_grad():
+                                        dp_actions = self.model.generate_traj(
+                                            traj_latents, images_dp, depths_dp, use_async=True
+                                        )
 
-                            local_actions = action_list
-                            if len(local_actions) >= 4:
-                                local_actions = local_actions[:4]
-                            action = local_actions[0]
-                            if action == 0:
-                                goal = None
-                                output_ids = None
-                                action = 2  # random action
-                                print('conduct a random action 2')
-                                observations, _, done, _ = self.env.step(action)
-                                step_id += 1
-                                messages = []
-                                continue
+                                random_choice = np.random.choice(dp_actions.shape[0])
+                                if self.model_args.continuous_traj:
+                                    action_list = traj_to_actions(dp_actions)
+                                    if len(action_list) < 8:
+                                        action_list += [0] * (8 - len(action_list))
+                                else:
+                                    action_list = chunk_token(dp_actions[random_choice])
 
-                        print('predicted goal', pixel_goal, goal, flush=True)
-                    else:
-                        action_seq = self.parse_actions(llm_outputs)
-                        print('actions', action_seq, flush=True)
+                                local_actions = action_list
+                                if len(local_actions) >= 4:
+                                    local_actions = local_actions[:4]
+                                action = local_actions[0]
+                                if action == 0:
+                                    goal = None
+                                    output_ids = None
+                                    action = 2  # random action
+                                    logger.info("Local planner produced STOP; taking recovery action TURN_LEFT (2).")
+                                    observations, _, done, _ = self.env.step(action)
+                                    step_id += 1
+                                    messages = []
+                                    continue
 
-                if len(action_seq) != 0:
+                            logger.info("Predicted goal pixel=%s world=%s", pixel_goal, goal)
+                        else:
+                            action_seq = self.parse_actions(llm_outputs)
+                            logger.debug("Parsed action sequence: %s", action_seq)
+
+                if not system3_terminated and len(action_seq) != 0:
                     action = action_seq[0]
                     action_seq.pop(0)
-                elif goal is not None:
+                elif not system3_terminated and goal is not None:
                     # Forking logic based on mode
                     if self.model_args.mode == 'system2':
                         action = agent.get_next_action(goal)
@@ -650,7 +662,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                                     action_list += [0] * (8 - len(action_list))
                             else:
                                 action_list = chunk_token(dp_actions[random_choice])
-                            print("first action_list", action_list)
+                            logger.debug("First action list: %s", action_list)
 
                             local_actions = action_list
                             if len(local_actions) >= 4:
@@ -658,7 +670,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             # if len(local_actions) >= 2:
                             #     local_actions = local_actions[:2]
 
-                            print("local_actions", local_actions)
+                            logger.debug("Local actions: %s", local_actions)
 
                             action = local_actions.pop(0)
                             # navdp
@@ -686,6 +698,25 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 else:
                     action = 0
 
+                # print("step_id", step_id, "action", action)
+
+                # refactor: core
+                if self.model_args.mode == 'system3' and action == 0 and not system3_terminated:
+                    # In system3 mode, do not let System 2 STOP terminate the episode.
+                    logger.info("System 2 STOP intercepted in system3 mode.")
+                    action = -1
+
+                if action == 5:
+                    self.env.step(action)
+                    observations, _, done, _ = self.env.step(action)
+                else:
+                    observations, _, done, _ = self.env.step(action)
+                    step_id += 1
+                    messages = []
+
+                info = self.env.get_metrics()
+                # We want to get the success or not metrics from info, so
+                # we have to put this after the env.step() call.
                 if info['top_down_map'] is not None:
                     if self.save_video:
                         # 1) Draw pixel goal on RGB if available (scale from ref size to raw RGB)
@@ -746,20 +777,41 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         font = self._vis_overlay_font_mono
 
                         global_instr = global_instruction
-                        local_instr = episode.instruction.instruction_text
-                        status = getattr(self.agent, "last_sys3_status", "N/A")
-                        thought = getattr(self.agent, "last_sys3_thought", "")
+                        local_instr = episode_instruction
+                        status = getattr(self.agent, "last_sys3_status", None) if self.agent is not None else None
+                        status = status or "N/A"
+                        thought = getattr(self.agent, "last_sys3_thought", None) if self.agent is not None else None
+                        thought = thought or "N/A"
 
                         # Pixel goal string
                         pg_str = "None"
                         if pixel_goal is not None:
-                            pg_str = f"[{pixel_goal[0]}, {pixel_goal[1]}]"
+                            pg_str = f"[{pixel_goal[0]},{pixel_goal[1]}]"
 
                         # Actions and queue
-                        action_map = {0: 'STOP', 1: '↑', 2: '←', 3: '→', 4: '↑^', 5: '↓'}
+                        action_map = {0: 'x', 1: '↑', 2: '←', 3: '→', 4: '↑^', 5: '↓'}
                         act_str = action_map.get(action, str(action)) if action is not None else "None"
-                        queue_str = " ".join([action_map.get(a, str(a)) for a in local_actions]) if local_actions else ""
-                        status_line = f"STATUS: {status:<12}  PIXEL: {pg_str:<18}  ACTION: {act_str}  QUEUE: {queue_str}"
+                        queue_str = "".join([action_map.get(a, str(a)) for a in local_actions]) if local_actions else ""
+                        status_line = f"STATUS:{status:<12} PIXEL:{pg_str:<10} ACTION:{act_str} QUEUE:{queue_str:<5}"
+
+                        # Env metrics line (success / distance / spl if present)
+                        env_line_parts = []
+                        if "success" in info:
+                            try:
+                                env_line_parts.append(f"succ={float(info['success']):.2f}")
+                            except Exception:
+                                env_line_parts.append(f"succ={info['success']}")
+                        if "distance_to_goal" in info:
+                            try:
+                                env_line_parts.append(f"dist={float(info['distance_to_goal']):.2f}")
+                            except Exception:
+                                env_line_parts.append(f"dist={info['distance_to_goal']}")
+                        if "spl" in info:
+                            try:
+                                env_line_parts.append(f"spl={float(info['spl']):.3f}")
+                            except Exception:
+                                env_line_parts.append(f"spl={info['spl']}")
+                        env_line = "  ".join(env_line_parts) if env_line_parts else ""
 
                         # Limit thought length/lines to fit panel
                         wrap_width = int(w / (font_size * 0.6))
@@ -772,16 +824,17 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             if thought_lines:
                                 thought_lines[-1] += " ..."
 
+                        combined_status = status_line if not env_line else f"{status_line}   {env_line}"
                         sections = [
                             [f"GLOBAL: {global_instr}"],
                             [f"LOCAL : {local_instr}"],
-                            [status_line],
+                            [combined_status],
                             thought_lines,
                         ]
 
                         y_text = 10
                         sep_color = (200, 200, 200)
-                        sep_pad = 6
+                        sep_pad = 5
                         # Top divider line between videos and text panel
                         draw.line([(0, 0), (w, 0)], fill=sep_color, width=1)
                         y_text = 10
@@ -803,16 +856,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         canvas[h:, :w] = np.array(text_img)
                         vis_frames.append(canvas)
 
-                # print("step_id", step_id, "action", action)
 
-                # refactor: core
-                if action == 5:
-                    self.env.step(action)
-                    observations, _, done, _ = self.env.step(action)
-                else:
-                    observations, _, done, _ = self.env.step(action)
-                    step_id += 1
-                    messages = []
 
                 if done and not done_by_env_flag:
                     logger.info(
@@ -1104,6 +1148,6 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                     draw.text((text_x, text_y), label_str, fill=opposite_color, font=font)
                     count += 1
             if save_img:
-                print(">>> dots overlaid image processed, stored in", save_path)
+                logger.info("Dots overlaid image processed, stored in %s", save_path)
                 img.save(save_path)
             return img
