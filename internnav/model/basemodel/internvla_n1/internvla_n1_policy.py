@@ -205,9 +205,6 @@ class InternVLAN1Net(PreTrainedModel):
         else:
             random_choice = np.random.choice(dp_actions.shape[0])
             action_list = chunk_token(dp_actions[random_choice])
-            
-        # action_list = [x for x in action_list if x != 0]
-        
         
         ##If the mode is async, S1 just use the part of actions
         if use_async:

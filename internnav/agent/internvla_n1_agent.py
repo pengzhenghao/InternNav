@@ -545,6 +545,7 @@ class InternVLAN1Agent(Agent):
                         rgbs, depths, self.s2_output.output_latent, use_async=True
                     )
                 else:
+                    raise ValueError("Sync mode is not supported for S1 inference")
                     self.s1_output = self.policy.s1_step_latent(
                         rgb, depth * 10000.0, self.s2_output.output_latent, use_async=False
                     )
