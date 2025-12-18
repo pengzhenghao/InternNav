@@ -43,12 +43,12 @@ STEP_OUTPUT_TOOL = {
             "properties": {
                 "thought": {
                     "type": "string",
-                    "description": "Reflect on progress, visibility of target, and why this new step is chosen."
+                    "description": "Reflect on current environment, the next milestone, the progress towards the milestone, visibility of target, and what should be done next. Note down the information served as the history information in future."
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["NAVIGATING", "SEARCHING", "VERIFICATION", "DONE"],
-                    "description": "The current status. 'NAVIGATING': Moving to a visible target. 'SEARCHING': Looking for the goal/landmarks. 'VERIFICATION': At goal, confirming success. 'DONE': Goal achieved."
+                    "enum": ["EXPLORE","NAVIGATE", "SEARCH", "VERIFY", "DONE", "ERROR"],
+                    "description": "The current status. 'EXPLORE': Exploring the environment to collect useful visual cues. 'NAVIGATE': Navigating to a visible target. 'SEARCH': Looking for the goal/landmarks. 'VERIFY': At goal, confirming success. 'DONE': Goal achieved. 'ERROR': Stuck or unable to proceed for 5+ steps."
                 },
                 "instruction": {
                     "type": "string",
@@ -58,14 +58,14 @@ STEP_OUTPUT_TOOL = {
                     "type": "boolean",
                     "description": "True if the instruction should be changed, False to keep the current one."
                 },
-                "discrete_actions": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["MOVE_FORWARD", "TURN_LEFT", "TURN_RIGHT", "STOP", "LOOK_UP", "LOOK_DOWN"]
-                    },
-                    "description": "Optional list of discrete actions to execute directly, bypassing the local planner. Use this for precise short-term control."
-                }
+                # "discrete_actions": {
+                #     "type": "array",
+                #     "items": {
+                #         "type": "string",
+                #         "enum": ["MOVE_FORWARD", "TURN_LEFT", "TURN_RIGHT", "STOP", "LOOK_UP", "LOOK_DOWN"]
+                #     },
+                #     "description": "Optional list of discrete actions to execute directly, bypassing the local planner. Use this for precise short-term control."
+                # }
             },
             "required": ["thought", "status", "instruction", "change_instruction"]
         }
@@ -142,35 +142,33 @@ Architecture context:
 - System 2: local navigation planner that follows short, concrete text instructions (e.g., "Turn left 1 meter, then go to the door").
 - System 3 (you): VLM that observes vision, maintains intent, and issues the next concise instruction to System 2.
 
-You have access to a robot's visual feed. You control a local navigation system (System 2) that takes short, simple text descriptions of where to go next.
-Reaching within 3 meters of the final goal counts as success. If the goal is a specific target (e.g., "the red door", "the table with a laptop"), treat success as being clearly at that target and within roughly 3 meters of it.
-You will be told the running counters for System 2 and System 3 calls; use them when pacing your decisions.
+You have access to a robot's visual feed. You control a local navigation system (System 2) that takes short, simple text descriptions of where to go next. Reaching within 3 meters of the final goal counts as success. If the goal is a specific target (e.g., "the red door", "the table with a laptop"), treat success as being clearly at that target and within roughly 3 meters of it. You will be told the running counters for System 2 and System 3 calls; use them when pacing your decisions.
 
 Status Definitions:
-- NAVIGATING: You see the next subgoal or target and are moving towards it.
-- SEARCHING: You cannot see the next subgoal/target, so you are looking around or exploring to find it. Use this whenever you are mainly rotating or probing the environment to locate the goal or key landmarks.
-- VERIFICATION: You believe you have reached the final goal, but you are performing a final check (e.g., looking around) to confirm.
+- EXPLORE: You are exploring the environment to collect useful visual cues. Write down the information in the thought field.
+- NAVIGATE: You see the next subgoal or target and are moving towards it.
+- SEARCH: You cannot see the next subgoal/target, so you are looking around or exploring to find it. Use this whenever you are mainly rotating or probing the environment to locate the goal or key landmarks.
+- VERIFY: You believe you have reached the final goal, but you are performing a final check (e.g., looking around) to confirm.
 - DONE: You have verified that the goal is accomplished.
+- ERROR: You are stuck, lost, or unable to make progress for a significant number of steps (e.g., ~5 System 3 calls with no visual change or progress), and cannot recover.
 
 Strategic Guidelines:
-1. Search First (especially at the beginning): If you cannot clearly see your next milestone or are uncertain about your location relative to the goal, DO NOT assume the path is forward. Issue instructions to look around (e.g., "Turn left and look around", "Turn right and look around") to orient yourself. When a new instruction/sub-episode has only 1–2 frames and you have no reliable memory of the surroundings, it is better to explore by rotating or turning around than to immediately walk straight; the target (e.g., a plant) may be behind you.
+1. Search First & Local Exploration: If you lack a clear understanding of the environment or the goal location, perform local exploration first to record useful visual cues (e.g., landmarks, layout) before committing to a long path. Do not assume the path is forward if uncertain. Issue instructions to look around (e.g., "Turn left and look around") to orient yourself.
 2. Verify Targets: Ensure the target you are heading towards is actually the correct one. If the goal is "door" but you are facing a staircase, check your surroundings first.
 3. Reflect on Progress: In your "thought", explicitly evaluate if your previous actions brought you closer to the high-level goal. If not, adjust your strategy (e.g., from moving to searching).
 4. Subgoals & Phrasing: Break the user goal into immediate, concrete subgoals. Use these as the instruction for System 2. IMPORTANT: Avoid complex spatial constraints like "keeping X on your left". System 2 often interprets "left" or "right" in such phrases as immediate turn commands. Instead, specify the target or direction directly (e.g., "Walk forward past the table", "Go to the white door").
 5. Anti-Premature Success (critical): It is very unlikely that you are already at the destination at the very beginning, or after only rotating in place without translating. You MUST NOT enter VERIFICATION/DONE unless you have strong positive visual evidence of the goal AND evidence that you are physically close (roughly within 3 meters). If you have not passed any clear milestones or have not made meaningful forward progress, assume you are NOT there yet and continue SEARCHING/NAVIGATING.
 6. Termination Condition First (critical): Before entering VERIFICATION, explicitly state in your "thought" a concrete termination condition for THIS goal: what visual cues must be true (e.g., "I am under the arch", "I am beside the red door") AND what prior path constraints must have been met (e.g. "I have already passed the pool"). The termination condition is not just "seeing the target" but "seeing the target AFTER completing the sequence". Then in VERIFICATION, actively check those cues. If the cues are not satisfied, do NOT output DONE—issue the next corrective instruction to satisfy them.
-7. Verification Stage (efficient): When you believe you have reached the goal, DO NOT immediately output DONE. Switch to "VERIFICATION" status and perform a targeted check. You do NOT have to do a full 360° rotation every time—rotate only as much as needed to confirm the goal and proximity, and prefer moving slightly closer or changing viewpoint to disambiguate.
-8. Instruction Style (System 2 friendly): Write instructions in a rule-based navigation style similar to R2R instructions, e.g., "Exit the bedroom and turn left. Walk straight passing the gray couch and stop near the rug." Prefer short imperative sentences that mention actions and concrete landmarks: "Exit the room and turn right.", "Walk straight past the table and stop near the chair." Avoid chatty language, self-references, or references to System 2/3; only describe what the robot should do.
+7. Verification Stage (efficient): When you believe you have reached the goal, DO NOT immediately output DONE. Switch to "VERIFICATION" status and perform a targeted check. CRITICAL: In the instruction field during verification, DO NOT explain what you are doing (e.g., "verifying the goal"). System 2 is not trained for abstract language. Just give the concrete movement command (e.g., "Turn around", "Walk to the table").
+8. Instruction Style (System 2 friendly): Write instructions in a rule-based navigation style similar to R2R instructions. Reuse the same language/landmarks from the user's original goal as much as possible if you know what to do. Prefer short imperative sentences that mention actions and concrete landmarks: "Exit the room and turn right.", "Walk straight past the table and stop near the chair." Avoid chatty language, self-references, or references to System 2/3; only describe what the robot should do.
 9. Sequential Execution: User goals are often strict sequences (e.g., "Go past X, walk between Y and Z, then stop at W"). You MUST execute these stages in order. Do not identify the final goal (W) until you have visually confirmed passing the intermediate landmarks (X, Y, Z). If you see W but haven't passed Y/Z, it is likely the wrong location or you are approaching from the wrong side.
 
+10. Camera Field of View (HFOV=79°): The robot's camera has a relatively narrow field of view (79°). This means objects may disappear from the side edges sooner than expected when you are passing them. To "pass" an object or go "through" a doorway, you typically need to move further forward than you might intuitively think to ensure you have actually cleared it. If you are unsure whether you have passed a landmark, verify by looking around or moving further forward.
+
 Your Loop:
-1. Analyze the current image.
-2. Determine if the goal is reached (success once within 3 meters).
-3. Reflect on current progress and validity of the previous plan.
-4. If you think you have arrived, first state a goal-specific termination condition in your thought, then trigger "VERIFICATION" status and issue instructions to check it (targeted rotation / viewpoint change / small approach).
-5. If in "VERIFICATION" status and you confirm the termination condition is satisfied AND you are within roughly 3 meters of the target, output "DONE". Otherwise, continue NAVIGATING or SEARCHING.
-6. If not reached, plan the immediate next step (Search or Move) by selecting a specific subgoal.
-7. Output a navigation instruction for the local system using the provided tool.
+1. Analyze the visual observations and reflect on the milestones and your progress.
+2. Decide the next status (EXPLORE, SEARCH, NAVIGATE, VERIFY, DONE, ERROR) and instruction.
+3. Use the tool to output your decision.
 """
         self.history.append({"role": "system", "content": system_prompt})
 
@@ -221,7 +219,7 @@ Your Loop:
                     "type": "text",
                     "text": (
                         "Current navigation instruction being executed by System 2 "
-                        f"(do NOT change it unless truly necessary) is:\n\"{current_instruction}\""
+                        f"is:\n\"{current_instruction}\""
                     ),
                 }
             )
@@ -363,6 +361,16 @@ Your Loop:
                 max_tokens=2000,
                 tools=[STEP_OUTPUT_TOOL],
                 tool_choice={"type": "function", "function": {"name": "output_navigation_plan"}},
+                extra_body={
+                    "extra_body": {
+                        "google": {
+                            "thinking_config": {
+                                "thinking_budget": -1,
+                                "include_thoughts": True
+                            }
+                        }
+                    }
+                }
             )
         except Exception as e:
             logger.error(f"LLM Call Failed: {e}")
@@ -370,9 +378,30 @@ Your Loop:
 
         response_message = completion.choices[0].message
         
+        # Log usage
+        if hasattr(completion, "usage"):
+            logger.info(f"[Sys3] Token Usage: {completion.usage}")
+            
         # Capture any natural language reasoning/content that occurred before the tool call
         # Some models output "thinking" traces in the content field even when calling tools.
         content_reasoning = response_message.content or ""
+
+        # Attempt to capture 'reasoning_content' from Gemini/OpenAI-compatible thinking models
+        # Note: This field might be in `reasoning_content` (OpenAI style) or `extra_fields`.
+        if hasattr(response_message, "reasoning_content") and response_message.reasoning_content:
+             content_reasoning += f"\n\n[Reasoning Trace]:\n{response_message.reasoning_content}"
+             
+        # Parse out <thought>...</thought> tags if present in the content
+        if "<thought>" in content_reasoning and "</thought>" in content_reasoning:
+            try:
+                start_idx = content_reasoning.find("<thought>")
+                end_idx = content_reasoning.find("</thought>")
+                if start_idx != -1 and end_idx != -1:
+                    thought_content = content_reasoning[start_idx + len("<thought>"):end_idx]
+                    content_reasoning = content_reasoning.replace(f"<thought>{thought_content}</thought>", "").strip()
+                    content_reasoning += f"\n\n[Reasoning Trace]:\n{thought_content}"
+            except Exception as e:
+                logger.warning(f"Failed to parse thought tags: {e}")
 
         tool_calls = response_message.tool_calls
         
@@ -395,9 +424,9 @@ Your Loop:
         tool_thought = plan.get("thought", "")
         combined_thought_parts = []
         if content_reasoning.strip():
-            combined_thought_parts.append(content_reasoning.strip())
+            combined_thought_parts.append("[Reasoning Trace]:\n" + content_reasoning.strip())
         if tool_thought.strip():
-            combined_thought_parts.append(tool_thought.strip())
+            combined_thought_parts.append("[Thought]:\n" + tool_thought.strip())
         
         plan["thought"] = "\n\n".join(combined_thought_parts)
 
@@ -670,8 +699,11 @@ class System3Agent(InternVLAN1Agent):
             if status == "DONE":
                 return None, "DONE", plan.get("thought")
             
-            if change_instruction and new_instruction:
-                assert new_instruction != self.current_instruction, "System 3 should not change the instruction to the same one"
+            if status == "ERROR":
+                logger.info("[Sys3] Status is ERROR. Treating as DONE (termination).")
+                return None, "ERROR", plan.get("thought")
+            
+            if change_instruction and new_instruction != self.current_instruction:
                 self.current_instruction = new_instruction
                 self.subepisode_id += 1
                 self.subepisode_frames_b64 = [img_b64] # Start new sub-episode

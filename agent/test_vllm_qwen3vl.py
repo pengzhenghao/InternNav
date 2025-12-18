@@ -2,7 +2,7 @@ from openai import OpenAI
 import json
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
-API_KEY = "AIzaSyAYLEaN_Erv15eJ5TrzhCPyB3xj55DCssk"  # 和你现在的一样
+API_KEY = ""  # 和你现在的一样
 
 def main():
     # Initialize OpenAI client
