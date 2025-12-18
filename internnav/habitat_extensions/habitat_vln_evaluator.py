@@ -448,6 +448,14 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             messages = []
                             output_ids = None
                             forward_action = 0
+                        elif status == 'ERROR':
+                            logger.info("System 3 reported ERROR; treating as episode termination (STOP).")
+                            action = 0
+                            system3_terminated = True
+                            local_actions = []
+                            messages = []
+                            output_ids = None
+                            forward_action = 0
                         elif new_instr and new_instr != episode_instruction:
                             logger.info("System 3 updated instruction: %s", new_instr)
                             
@@ -473,8 +481,9 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             sources = copy.deepcopy(self.conversation)
                             instr_text = episode_instruction[:-1] if episode_instruction.endswith('.') else episode_instruction
                             sources[0]["value"] = sources[0]["value"].replace(
-                                '<instruction>.', instr_text
+                                '<instruction>', instr_text
                             )
+                            logger.info("[Sys2] Action: %s, Instruction: %s", action, instr_text)
                             cur_images = rgb_list[-1:]
                             if step_id == 0:
                                 history_id = []
@@ -493,6 +502,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                             input_images = [rgb_list[i] for i in history_id] + cur_images
                             input_img_id = 0
                         else:
+                            logger.info("[Sys2] Action: %s No instruction message prepared.", action)
                             assert action == 5
                             sources = [{"from": "human", "value": ""}, {"from": "gpt", "value": ""}]
                             input_images += [look_down_image]
