@@ -37,11 +37,13 @@ DEFAULT_VLLM_API_URL = os.environ.get("VLLM_API_URL", "http://localhost:8080/v1"
 DEFAULT_VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "EMPTY")
 DEFAULT_MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-VL-30B-A3B-Instruct")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
+if not logging.getLogger().handlers:
+    # Avoid configuring global logging at import time if the evaluator has already set it up
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
 logger = logging.getLogger(os.path.basename(__file__))
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
