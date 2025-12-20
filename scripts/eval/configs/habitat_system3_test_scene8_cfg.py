@@ -26,6 +26,7 @@ eval_cfg = EvalCfg(
             "continuous_traj": True,
             "max_new_tokens": 1024,
             "vis_debug": False,  # InternVLAN1Agent needs this
+            "sys3_arch": "single",
         },
     ),
     env=EnvCfg(

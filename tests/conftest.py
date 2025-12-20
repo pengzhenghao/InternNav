@@ -1,4 +1,12 @@
+import sys
+from pathlib import Path
 import pytest
+
+
+# Ensure the repo root is on PYTHONPATH so `import internnav` works in tests
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 @pytest.fixture
