@@ -5,7 +5,6 @@ from internnav.evaluator.vln_distributed_evaluator import VLNDistributedEvaluato
 # register habitat
 # try:
 import internnav.habitat_extensions  # noqa: F401 # isort: skip
-print("Habitat extensions imported")
 # except Exception as e:
     # print(f"Warning: ({e}), Habitat Evaluation is not loaded in this runtime. Ignore this if not using Habitat.")
 

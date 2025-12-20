@@ -1,6 +1,9 @@
 from internnav.configs.evaluator import EvalCfg
 from internnav.env import Env
 from internnav.utils.comm_utils.client import AgentClient
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Evaluator:
@@ -27,7 +30,7 @@ class Evaluator:
         def decorator(evaluator_class):
             if evaluator_type in cls.evaluators:
                 raise ValueError(f"Evaluator {evaluator_type} already registered.")
-            print(f"Registering evaluator {evaluator_type}")
+            logger.debug("Registering evaluator %s", evaluator_type)
             cls.evaluators[evaluator_type] = evaluator_class
             return evaluator_class
 

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 import numpy as np
@@ -14,6 +15,9 @@ from internnav.utils.dist import (
     init_distributed_mode,
     is_dist_avail_and_initialized,
 )
+from internnav.utils.logging_utils import setup_rank_logging
+
+logger = logging.getLogger(__name__)
 
 
 class DistributedEvaluator(Evaluator):
@@ -44,6 +48,19 @@ class DistributedEvaluator(Evaluator):
             self.output_path = self.output_path
         else:
             self.output_path = eval_cfg.eval_settings.get("output_path")
+
+        # Centralized distributed logging:
+        # - always log to file under the experiment output_path
+        # - only rank 0 streams to stdout (tmux)
+        log_file = setup_rank_logging(self.output_path, self.rank, self.world_size, stream_rank0_only=True)
+        logger.info(
+            "DistributedEvaluator init: rank=%d world_size=%d local_rank=%d output_path=%s log_file=%s",
+            self.rank,
+            self.world_size,
+            self.local_rank,
+            self.output_path,
+            log_file,
+        )
 
         # habitat env also need rank to split dataset
         eval_cfg.env.env_settings['rank'] = get_rank()

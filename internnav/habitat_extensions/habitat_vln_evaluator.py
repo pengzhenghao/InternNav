@@ -282,7 +282,11 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                         nes.append(res['ne'])
 
         # Episode loop is now driven by env.reset() + env.is_running
-        process_bar = tqdm.tqdm(total=len(self.env.episodes), desc=f"Eval Epoch {self.epoch} Rank {self.rank}")
+        process_bar = tqdm.tqdm(
+            total=len(self.env.episodes),
+            desc=f"Eval Epoch {self.epoch} Rank {self.rank}",
+            disable=(self.rank != 0),
+        )
         while self.env.is_running:
 
             # ------------ 1. Start of episode ------------
