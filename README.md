@@ -56,6 +56,72 @@ pip install flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp39-cp39-linux_x86_64.wh
 **Note:** The habitat-lab repository is included as a git submodule in this repository. Make sure to initialize it with `git submodule update --init --recursive habitat-lab` before installing.
 
 
+## Isaac Sim / Urban Sim Environment Installation
+
+For Isaac Sim based environment setup (URBAN-SIM), follow these steps:
+
+### Prerequisites
+- Ubuntu 22.04 or 24.04
+- NVIDIA GPU with at least 12GB VRAM (RTX 4080/4090 recommended)
+- **GCC/G++ 11** (Required for building Isaac Sim on Ubuntu 22.04/24.04)
+
+### Installation Steps
+
+1. **Install and Build Isaac Sim 5.x from Source:**
+   
+   Clone the repository and build it. This requires git lfs.
+   ```bash
+   # Clone to your home directory (or preferred location)
+   git clone https://github.com/isaac-sim/IsaacSim.git ${HOME}/IsaacSim
+   cd ${HOME}/IsaacSim
+   
+   # Initialize Git LFS
+   git lfs install
+   git lfs pull
+   
+   # Build Isaac Sim
+   # Note: Ensure you are using gcc-11/g++-11.
+   # If you have multiple gcc versions, you might need to set CC/CXX.
+   # This build process can take a while.
+   ./build.sh
+   ```
+   
+2. **Setup URBAN-SIM Submodule:**
+   Initialize the submodule if you haven't already:
+   ```bash
+   # Navigate back to project root
+   cd Path/to/InternNav/
+   git submodule update --init --recursive urban-sim
+   ```
+
+3. **Link Isaac Sim:**
+   Link your local Isaac Sim build to the urban-sim directory:
+   ```bash
+   cd urban-sim
+   ln -sf ${HOME}/IsaacSim/_build/linux-x86_64/release ./_isaac_sim
+   ```
+
+4. **Install Environment and Dependencies:**
+   Create the conda environment and install dependencies using the provided script.
+   ```bash
+   # Create conda environment (default name: urbansim)
+   bash urbansim.sh -c urbansim
+   conda activate urbansim
+   
+   # Install dependencies
+   bash urbansim.sh -i
+   
+   # Install advanced dependencies (RL frameworks, procedural generation)
+   bash urbansim.sh -a
+   ```
+
+5. **Download Assets:**
+   ```bash
+   python scripts/tools/collectors/collect_asset.py
+   python scripts/tools/converters/convert_asset.py
+   ```
+
+
 ### Real-World Deployment Setup
 
 For deployment on the Unitree Go2 robot and the remote inference server:
@@ -186,7 +252,8 @@ Please refer to the [documentation](https://internrobotics.github.io/user_guide/
             <li align="left"><a href="https://arxiv.org/abs/2505.08712">GRScenes-100</a></li>
          </ul>
       </td>
-   </tbody>
+   </tr>
+  </tbody>
 </table>
 
 ### 🤗 Model Zoo & Downloads
@@ -231,7 +298,8 @@ Please refer to the [documentation](https://internrobotics.github.io/user_guide/
             <li align="left"><a href="https://huggingface.co/InternRobotics/InternVLA-N1-DualVLN">InternVLA-N1 (Dual System) <small>DualVLN</small></a></li>
          </ul>
       </td>
-   </tbody>
+   </tr>
+  </tbody>
 </table>
 
 <!-- **📝 Note:**
