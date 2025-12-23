@@ -54,12 +54,53 @@ class MultiAgentSystem3Navigator:
             raise ValueError("MultiAgentConfig must set planner_model (or caller must fill defaults).")
 
         # Generate milestones once
-        ms = self.llm.generate_milestones(self.cfg.tracker_model or self.cfg.planner_model, self.state.user_goal, extra_body=self._extra_body)
+        ms = self.llm.generate_milestones(
+            model=self.cfg.tracker_model or self.cfg.planner_model,
+            goal=self.state.user_goal,
+            context="",
+            extra_body=self._extra_body,
+        )
         self.state.milestones = ms
         self.state.progress = []
         self.state.current_milestone_idx = 0
         self._initialized = True
         logger.info("[Sys3-MA] Initialized milestones: %d", len(ms))
+
+    def _replan(self) -> None:
+        logger.info("[Sys3-MA] Replanning triggered.")
+        # Gather context
+        failures = [p for p in self.state.progress if p.state == "FAILED"]
+        completed = [p for p in self.state.progress if p.state == "DONE"]
+        
+        context_lines = []
+        if completed:
+            context_lines.append("Completed so far:")
+            for p in completed:
+                # Find title if possible
+                m = next((x for x in self.state.milestones if x.id == p.milestone_id), None)
+                title = m.title if m else p.milestone_id
+                context_lines.append(f"- {title}")
+        
+        if failures:
+            context_lines.append("FAILED milestones:")
+            for p in failures:
+                m = next((x for x in self.state.milestones if x.id == p.milestone_id), None)
+                title = m.title if m else p.milestone_id
+                context_lines.append(f"- {title}: {p.evidence}")
+                
+        context_text = "\n".join(context_lines)
+
+        ms = self.llm.generate_milestones(
+            model=self.cfg.tracker_model or self.cfg.planner_model,
+            goal=self.state.user_goal,
+            context=context_text,
+            extra_body=self._extra_body,
+        )
+        self.state.milestones = ms
+        self.state.progress = []
+        self.state.current_milestone_idx = 0
+        self.state.replan_needed = False
+        logger.info("[Sys3-MA] Replanned. New milestones: %d", len(ms))
 
     def step(self) -> Optional[System3Plan]:
         self.init_episode()
@@ -81,6 +122,9 @@ class MultiAgentSystem3Navigator:
             for p in self.state.progress:
                 p.last_update_sys3_call = self.state.sys3_calls
             self.state.advance_if_done()
+
+        if self.state.replan_needed:
+            self._replan()
 
         cur_ms = self.state.get_current_milestone()
 
@@ -121,12 +165,19 @@ class MultiAgentSystem3Navigator:
         plan.status = intent.status
         plan.change_instruction = intent.change_instruction
 
+        thought = (plan.thought or "").strip()
+        # Keep the INFO log single-line and bounded in size.
+        thought_one_line = thought.replace("\n", "\\n")
+        if len(thought_one_line) > 800:
+            thought_one_line = thought_one_line[:800] + "...(truncated)"
+
         logger.info(
-            "[Sys3-MA] Plan: status=%s change=%s ms=%s instr=%s",
+            "[Sys3-MA] Plan: status=%s change=%s ms=%s instr=%s thought=%s",
             plan.status,
             plan.change_instruction,
             (cur_ms.id if cur_ms else "none"),
             (plan.instruction or "")[:140],
+            thought_one_line,
         )
         return plan
 

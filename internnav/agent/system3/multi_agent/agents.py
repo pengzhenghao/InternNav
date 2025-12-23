@@ -167,17 +167,29 @@ class MultiAgentLLM:
     def __post_init__(self) -> None:
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
-    def generate_milestones(self, model: str, goal: str, extra_body: Optional[Dict[str, Any]] = None) -> List[Milestone]:
+    def generate_milestones(
+        self,
+        model: str,
+        goal: str,
+        context: str = "",
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> List[Milestone]:
+        prompt_content = f'Goal: "{goal}"\n'
+        if context:
+            prompt_content += f"Context/History: {context}\n"
+        prompt_content += "Return milestones."
+
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You generate a short ordered milestone list for a navigation instruction.\n"
                     "Return 3-7 milestones. Each milestone should be a concrete subgoal.\n"
-                    "Milestones must be ordered and not redundant."
+                    "Milestones must be ordered and not redundant.\n"
+                    "If context is provided, adapt the milestones to the current situation."
                 ),
             },
-            {"role": "user", "content": f'Goal: "{goal}"\nReturn milestones.'},
+            {"role": "user", "content": prompt_content},
         ]
         parsed, raw = _call_with_tool_fallback(self.client, model, messages, MILESTONE_TOOL, "output_milestones", extra_body=extra_body)
         if not parsed:
@@ -223,7 +235,14 @@ class MultiAgentLLM:
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
         messages = [
-            {"role": "system", "content": "You are a milestone progress tracker. Update states with brief evidence."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a milestone progress tracker. Update states with brief evidence.\n"
+                    "Mark a milestone as DONE if completion criteria are met.\n"
+                    "Mark a milestone as FAILED if it is impossible or the agent is persistently stuck/blocked."
+                ),
+            },
             {"role": "user", "content": content},
         ]
         parsed, raw = _call_with_tool_fallback(

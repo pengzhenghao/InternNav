@@ -14,7 +14,7 @@ External interface is intentionally tiny: call `step()` after appending frames t
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .compiler import InstructionCompiler
@@ -41,7 +41,8 @@ class System3Navigator:
     model_name: str
     api_key: str
     base_url: str
-    profile: System3PromptProfile = DEFAULT_PROFILE
+    # Avoid sharing a mutable profile instance across navigators.
+    profile: System3PromptProfile = field(default_factory=lambda: System3PromptProfile(**DEFAULT_PROFILE.__dict__))
 
     dump_dir: Optional[str] = None
     dump_freq: int = 1
@@ -88,11 +89,18 @@ class System3Navigator:
         # Update state trackers used by critic
         self.state.last_emitted_instruction = plan.instruction or self.state.last_emitted_instruction
 
+        thought = (plan.thought or "").strip()
+        # Keep the INFO log single-line and bounded in size.
+        thought_one_line = thought.replace("\n", "\\n")
+        if len(thought_one_line) > 800:
+            thought_one_line = thought_one_line[:800] + "...(truncated)"
+
         logger.info(
-            "[Sys3] Plan: status=%s change=%s instr=%s",
+            "[Sys3] Plan: status=%s change=%s instr=%s thought=%s",
             plan.status,
             plan.change_instruction,
             (plan.instruction or "")[:140],
+            thought_one_line,
         )
         return plan
 
