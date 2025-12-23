@@ -53,7 +53,7 @@ class MultiAgentConfig:
     verifier_model: str = ""
 
     # Frequency controls (reduce cost/latency)
-    tracker_interval_calls: int = 3  # call tracker every N System3 calls
+    tracker_interval_calls: int = 1  # call tracker every N System3 calls
     verifier_on_verify_only: bool = True
 
     # If True, planner emits System3Plan directly. If False, planner emits "intent" and writer emits final System3Plan.

@@ -22,6 +22,7 @@ class MultiAgentSystem3State(System3State):
     milestones: List[Milestone] = field(default_factory=list)
     progress: List[MilestoneProgress] = field(default_factory=list)
     current_milestone_idx: int = 0
+    replan_needed: bool = False
 
     def get_current_milestone(self) -> Optional[Milestone]:
         if 0 <= self.current_milestone_idx < len(self.milestones):
@@ -46,8 +47,13 @@ class MultiAgentSystem3State(System3State):
         if not cur:
             return
         p = self.get_progress(cur.id)
-        if p and p.state == "DONE":
+        if not p:
+            return
+            
+        if p.state == "DONE":
             self.current_milestone_idx = min(self.current_milestone_idx + 1, max(len(self.milestones) - 1, 0))
+        elif p.state == "FAILED":
+            self.replan_needed = True
 
 
 
