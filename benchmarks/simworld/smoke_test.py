@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 
 def _bgr_to_rgb(img_bgr: np.ndarray) -> np.ndarray:
@@ -56,8 +57,17 @@ def main() -> int:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save as numpy array (for programmatic use)
     np.save(out_path, img_rgb)
-    print(f"[smoke_test] OK. Saved one RGB frame to {out_path} with shape={img_rgb.shape} dtype={img_rgb.dtype}")
+    
+    # Save as PNG image (for human viewing)
+    png_path = out_path.with_suffix('.png')
+    Image.fromarray(img_rgb.astype(np.uint8)).save(png_path)
+    
+    print(f"[smoke_test] OK. Saved RGB frame:")
+    print(f"  - NumPy: {out_path} (shape={img_rgb.shape}, dtype={img_rgb.dtype})")
+    print(f"  - PNG:   {png_path} (viewable image)")
     return 0
 
 
