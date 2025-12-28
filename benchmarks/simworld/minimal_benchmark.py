@@ -13,6 +13,7 @@ import sys
 import time
 import argparse
 import numpy as np
+import json
 
 # Add external/SimWorld to python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -49,7 +50,6 @@ def main():
     if not os.path.exists(roads_path):
         print(f"[benchmark] Error: roads.json not found at {roads_path}")
         return
-    # config['map.input_roads'] = roads_path # This fails because Config doesn't support assignment
     
     # Update config directly
     if 'map' not in config.config:
@@ -72,11 +72,36 @@ def main():
     
     comm = Communicator(ucv)
 
+    # Clean up environment from previous runs
+    print("[benchmark] Clearing environment...")
+    try:
+        comm.clear_env()
+    except Exception as e:
+        print(f"[benchmark] Warning: clear_env failed: {e}")
+    time.sleep(1.0)
+
     # 3.5 Spawn UE Manager (Required for getting agent positions)
     # The UE Manager handles global state queries
     print("[benchmark] Spawning UE Manager...")
     comm.spawn_ue_manager(config['simworld.ue_manager_path'])
-    time.sleep(1.0)
+    time.sleep(2.0)
+
+    # Wait for UE Manager to be ready
+    print("[benchmark] Waiting for UE Manager...")
+    for _ in range(10):
+        try:
+            res = comm.unrealcv.get_informations(comm.ue_manager_name)
+            if res and res.strip():
+                 # Try to validate JSON
+                 try:
+                     json.loads(res)
+                     print("[benchmark] UE Manager ready (valid JSON).")
+                     break
+                 except json.JSONDecodeError:
+                     print("[benchmark] UE Manager responding but invalid JSON yet.")
+        except:
+            pass
+        time.sleep(1.0)
 
     # 3. Define Task (Start -> Goal)
     # We pick two random nodes that are connected (reachable)
@@ -115,15 +140,24 @@ def main():
 
     # 4. Spawn Agent
     # We use Humanoid
-    agent = Humanoid(position=start_node.position, direction=Vector(1, 0), map=sim_map, communicator=comm, config=config)
+    # Important: Reset ID counter if we cleared env
+    Humanoid._id_counter = 0
+    Humanoid._camera_id_counter = 1
     
-    # Cleanup previous agents just in case? 
-    # SimWorld doesn't have a clear "reset" for agents, but spawning might reuse ID if we restarted script?
-    # Actually Humanoid._id_counter increments. 
-    # Ideally we should clear the scene but let's just spawn a new one.
+    agent = Humanoid(position=start_node.position, direction=Vector(1, 0), map=sim_map, communicator=comm, config=config)
+    print(f"[benchmark] Created agent with ID: {agent.id}")
     
     comm.spawn_agent(agent, name=None, model_path="/Game/TrafficSystem/Pedestrian/Base_User_Agent.Base_User_Agent_C", type="humanoid")
-    time.sleep(0.5)
+    time.sleep(2.0)
+    
+    # 4.5 Register Agent with UE Manager
+    print("[benchmark] Updating UE Manager...")
+    try:
+        ucv.update_ue_manager(comm.ue_manager_name)
+    except Exception as e:
+        print(f"[benchmark] Warning: update_ue_manager failed: {e}")
+        
+    time.sleep(1.0)
     
     # Force teleport to start to be precise (using Z=100 as safe default)
     actor_name = comm.get_humanoid_name(agent.id)
@@ -153,7 +187,33 @@ def main():
         step_count += 1
         
         # 1. Update Agent State
-        info = comm.get_position_and_direction(humanoid_ids=[agent.id])
+        # The agent ID is likely 0, but let's be robust
+        try:
+             info = comm.get_position_and_direction(humanoid_ids=[agent.id])
+        except Exception as e:
+             # print(f"[benchmark] Error getting/parsing info: {e}")
+             time.sleep(0.5)
+             continue
+        
+        # If agent 0 is not found, maybe the ID reset logic is tricky?
+        # Let's try to find ANY humanoid in the info
+        if ("humanoid", agent.id) not in info:
+             print(f"[benchmark] Warning: Agent {agent.id} not found. Available keys: {list(info.keys())}")
+             
+             # Fallback: if there is exactly one humanoid, use it
+             humanoid_keys = [k for k in info.keys() if k[0] == "humanoid"]
+             if len(humanoid_keys) == 1:
+                 print(f"[benchmark] Found alternative humanoid: {humanoid_keys[0]}. Updating agent ID.")
+                 agent.id = humanoid_keys[0][1]
+                 info = comm.get_position_and_direction(humanoid_ids=[agent.id])
+             else:
+                 # Try once more after a short sleep
+                 time.sleep(0.5)
+                 info = comm.get_position_and_direction(humanoid_ids=[agent.id])
+                 if ("humanoid", agent.id) not in info:
+                     print(f"[benchmark] Error: Agent {agent.id} lost. Exiting.")
+                     break
+        
         current_pos, current_yaw = info[("humanoid", agent.id)]
         
         # Update agent object (SimWorld agents need this manually updated)
@@ -211,8 +271,13 @@ def main():
     print("-" * 40)
     
     # Get final collision stats
-    h_col, o_col, b_col, v_col = comm.get_collision_number(agent.id)
-    total_collisions = h_col + o_col + b_col + v_col
+    try:
+        h_col, o_col, b_col, v_col = comm.get_collision_number(agent.id)
+        total_collisions = h_col + o_col + b_col + v_col
+    except Exception as e:
+        print(f"[benchmark] Warning: Could not get collision stats: {e}")
+        total_collisions = -1
+        h_col, o_col, b_col, v_col = -1, -1, -1, -1
     
     # Success Rate (Binary)
     sr = 1.0 if success else 0.0
@@ -245,4 +310,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
