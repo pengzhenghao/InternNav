@@ -161,3 +161,5 @@ flash_attn-2.7.3*.whl
 scripts/realworld/test_data/
 test_data/
 flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp39-cp39-linux_x86_64.whl.1
+benchmarks/simworld/output/
+benchmarks/simworld/benchmarks/
