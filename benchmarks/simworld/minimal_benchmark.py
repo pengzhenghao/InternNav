@@ -65,8 +65,30 @@ class BenchmarkLogger:
             # Assuming image is RGB numpy array (H, W, 3)
             # Ensure it's in BGR for OpenCV
             if isinstance(image, np.ndarray):
-                bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                self.vis_frames.append(bgr_image)
+                # NOTE: SimWorld get_camera_observation returns BGR by default when using "direct" mode (via unrealcv.get_image)
+                # because opencv reads are BGR.
+                # However, our other scripts (smoke_test) suggest it might be returning BGR and needing conversion for PIL.
+                # Let's verify:
+                # If image is BGR:
+                #   We need BGR for VideoWriter. So we should NOT convert.
+                # If image is RGB:
+                #   We need BGR for VideoWriter. So we should convert RGB2BGR.
+                
+                # Based on user feedback, the previous video had wrong colors (blue/orange swap).
+                # This means we likely swapped channels when we shouldn't have, or vice versa.
+                # Previous code: bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                # If input was already BGR, then this swapped it to RGB, and VideoWriter (expecting BGR) wrote RGB data,
+                # resulting in swapped colors on playback.
+                
+                # So if input is BGR, we should just use it as is.
+                # self.vis_frames.append(image)
+                
+                # Let's assume input from comm.get_camera_observation is BGR (standard OpenCV format from SimWorld).
+                self.vis_frames.append(image)
+                
+                # Note: If we are sending this to VLM (System 3), we MUST convert BGR to RGB.
+                # This script is just a benchmark without VLM, but for future reference:
+                # RGB_for_VLM = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     def save_video_file(self, fps=10):
         if self.save_video and self.vis_frames:
@@ -393,10 +415,13 @@ def main():
 
     # Clean up connection to avoid hanging
     logger.log("[benchmark] Closing connection...")
-    # comm.disconnect()
-    # ucv.client.disconnect()
+    comm.disconnect()
+    
+    # Wait briefly for threads to spin down (optional)
+    time.sleep(0.5)
+    
     # Force exit to avoid hanging threads
-    sys.exit(0)
+    os._exit(0)
 
 if __name__ == "__main__":
     main()

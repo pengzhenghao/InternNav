@@ -1,0 +1,38 @@
+[
+  {
+    "id": "task_grocery_01",
+    "instruction": "Find the Small grocery store or shop",
+    "target_pos": [
+      29557.08,
+      -4072.21
+    ],
+    "target_id": "GEN_BP_Building_05_C_26"
+  },
+  {
+    "id": "task_random_00",
+    "instruction": "Go to Square, white, columns out front government",
+    "target_pos": [
+      -11340.26,
+      6165.3
+    ],
+    "target_id": "GEN_BP_Building_19_C_18"
+  },
+  {
+    "id": "task_random_01",
+    "instruction": "Go to Square, red, mid-rise apartment",
+    "target_pos": [
+      44969.51,
+      -10079.47
+    ],
+    "target_id": "GEN_BP_Building_11_C_65"
+  },
+  {
+    "id": "task_random_02",
+    "instruction": "Go to Square, red, mid-rise apartment",
+    "target_pos": [
+      44969.51,
+      -10079.47
+    ],
+    "target_id": "GEN_BP_Building_11_C_65"
+  }
+]
