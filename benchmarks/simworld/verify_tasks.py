@@ -43,10 +43,22 @@ def main():
 
     # 3. Load Map (Ground Truth)
     config = Config()
-    roads_path = os.path.join(simworld_path, 'simworld/data/roads.json')
-    if not os.path.exists(roads_path):
-        print(f"Error: roads.json not found at {roads_path}")
+    possible_paths = [
+        os.path.join(simworld_path, 'simworld/data/predefined_roads.json'),
+        os.path.join(simworld_path, 'simworld/data/sample_data/road.json'),
+        os.path.join(simworld_path, 'simworld/data/roads.json'),
+    ]
+    roads_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            roads_path = p
+            break
+            
+    if not roads_path:
+        print(f"Error: No roads JSON found in {simworld_path}")
         return
+        
+    print(f"Using map: {roads_path}")
         
     if 'map' not in config.config:
         config.config['map'] = {}
