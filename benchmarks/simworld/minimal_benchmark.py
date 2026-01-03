@@ -121,10 +121,22 @@ def main():
     config = Config()
     
     # Locate roads.json
-    roads_path = os.path.join(simworld_path, 'simworld/data/roads.json')
-    if not os.path.exists(roads_path):
-        logger.log(f"[benchmark] Error: roads.json not found at {roads_path}")
+    possible_paths = [
+        os.path.join(simworld_path, 'simworld/data/predefined_roads.json'),
+        os.path.join(simworld_path, 'simworld/data/sample_data/road.json'),
+        os.path.join(simworld_path, 'simworld/data/roads.json'),
+    ]
+    roads_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            roads_path = p
+            break
+            
+    if not roads_path:
+        logger.log(f"[benchmark] Error: No roads.json found in {simworld_path}/simworld/data/")
         return
+    
+    logger.log(f"[benchmark] Using map file: {roads_path}")
     
     # Update config directly
     if 'map' not in config.config:
