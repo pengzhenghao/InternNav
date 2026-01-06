@@ -13,3 +13,6 @@
 [submodule "urban-sim"]
 	path = urban-sim
 	url = https://github.com/DhlinV/URBAN-SIM-UCLA-Internal.git
+[submodule "external/SimWorld-Robotics"]
+	path = external/SimWorld-Robotics
+	url = https://github.com/SCAI-JHU/SimWorld-Robotics.git
